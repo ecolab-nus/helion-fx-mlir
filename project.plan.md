@@ -53,7 +53,7 @@ helion-mlir/
     tests/
       FileCheck/
         matmul_tiled.json
-        matmul_tiled.mlir.expected
+        matmul_tiled.expected.mlir
         ...
 ```
 
@@ -415,7 +415,7 @@ Run a light canonical pipeline after emission:
 
 **Golden/IR tests (FileCheck)**
 
-* `json2mlir < tests/FileCheck/matmul_tiled.json | FileCheck tests/.../matmul_tiled.mlir.expected`
+* `json2mlir < tests/FileCheck/matmul_tiled.json | FileCheck tests/.../matmul_tiled.expected.mlir`
 
 **End-to-end**
 
