@@ -57,7 +57,7 @@
                 }
               }
             ],
-            "attrs": {"alpha": 1.0, "beta": 1.0}
+            "attrs": {"alpha": 1, "beta": 1}
           },
           {"op": "hl.tile.end"},
           {

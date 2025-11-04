@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Pydantic models capturing the Helion JSON interchange schema."""
+
 from typing import Any, Dict, List, Mapping, Optional, Union
 
 from pydantic import BaseModel, Field, ValidationError, root_validator, validator
@@ -9,6 +11,8 @@ AllowedDtypes = {"f16", "bf16", "f32", "f64", "i32", "i64"}
 
 
 class TensorTypeSpec(BaseModel):
+    """Tensor shape/element specification used by both tensor and memref types."""
+
     shape: List[ScalarExpr]
     elem: str
 
@@ -20,6 +24,8 @@ class TensorTypeSpec(BaseModel):
 
 
 class TypeSpec(BaseModel):
+    """Union wrapper that ensures only one of tensor/memref is populated."""
+
     tensor: Optional[TensorTypeSpec] = None
     memref: Optional[TensorTypeSpec] = None
 
@@ -32,15 +38,21 @@ class TypeSpec(BaseModel):
 
 
 class ArgumentSpec(BaseModel):
+    """Function argument definition."""
+
     id: str
     type: TypeSpec
 
 
 class ReturnSpec(BaseModel):
+    """Function return definition."""
+
     type: TypeSpec
 
 
 class SliceSpec(BaseModel):
+    """Description of a tile slice used by load/store operations."""
+
     base: str
     offsets: List[ScalarExpr]
     sizes: Optional[List[ScalarExpr]] = None
@@ -55,10 +67,14 @@ class SliceSpec(BaseModel):
 
 
 class SliceArg(BaseModel):
+    """Helper wrapper so slices can appear inline within torch op argument lists."""
+
     slice: SliceSpec
 
 
 class HlAllocOp(BaseModel):
+    """Allocate a result buffer (matches Helion's hl.alloc intrinsic)."""
+
     op: str
     shape: List[ScalarExpr]
     dtype: str
@@ -78,6 +94,8 @@ class HlAllocOp(BaseModel):
 
 
 class HlTileBeginOp(BaseModel):
+    """Start of a tiled loop nest (hl.tile.begin)."""
+
     op: str
     iters: List[str]
     sizes: List[ScalarExpr]
@@ -100,6 +118,8 @@ class HlTileBeginOp(BaseModel):
 
 
 class HlTileEndOp(BaseModel):
+    """End of the current tiled loop (hl.tile.end)."""
+
     op: str
 
     @validator("op")
@@ -110,6 +130,8 @@ class HlTileEndOp(BaseModel):
 
 
 class HlZerosOp(BaseModel):
+    """Zero-initialise a tile-sized scratch buffer (hl.zeros)."""
+
     op: str
     shape: List[ScalarExpr]
     dtype: str
@@ -129,6 +151,8 @@ class HlZerosOp(BaseModel):
 
 
 class HlStoreSliceOp(BaseModel):
+    """Copy a tile-sized value into the destination buffer (hl.store_slice)."""
+
     op: str
     dst: str
     offsets: List[ScalarExpr]
@@ -151,6 +175,8 @@ class HlStoreSliceOp(BaseModel):
 
 
 class HlReturnOp(BaseModel):
+    """Return op at the end of the function body."""
+
     op: str
     values: List[str]
 
@@ -162,6 +188,8 @@ class HlReturnOp(BaseModel):
 
 
 class HlAssertEqOp(BaseModel):
+    """Runtime equality assertion (hl.assert_eq)."""
+
     op: str
     lhs: str
     rhs: str
@@ -174,22 +202,24 @@ class HlAssertEqOp(BaseModel):
         return value
 
 
-class TorchAddmmOp(BaseModel):
+class TorchOp(BaseModel):
+    """Generic torch.* call emitted directly from captured FX graphs."""
+
     op: str
-    result: str
-    args: List[Union[str, SliceArg]]
-    attrs: Dict[str, float] = Field(default_factory=dict)
+    result: Optional[str] = None
+    args: List[Union[str, SliceArg, int, float]]
+    attrs: Dict[str, Any] = Field(default_factory=dict)
 
     @validator("op")
     def validate_op(cls, value: str) -> str:
-        if value != "torch.addmm":
-            raise ValueError("torch.addmm op expected")
+        if not value.startswith("torch."):
+            raise ValueError("Torch operations must be prefixed with 'torch.'")
         return value
 
     @validator("args")
-    def validate_args(cls, value: List[Union[str, SliceArg]]) -> List[Union[str, SliceArg]]:
+    def validate_args(cls, value: List[Union[str, SliceArg, int, float]]) -> List[Union[str, SliceArg, int, float]]:
         if not value:
-            raise ValueError("torch.addmm requires at least one argument")
+            raise ValueError("torch.* ops require at least one argument")
         return value
 
 
@@ -201,11 +231,13 @@ Operation = Union[
     HlStoreSliceOp,
     HlReturnOp,
     HlAssertEqOp,
-    TorchAddmmOp,
+    TorchOp,
 ]
 
 
 class FunctionSpec(BaseModel):
+    """Top-level function container (name, arguments, body)."""
+
     name: str
     args: List[ArgumentSpec]
     rets: List[ReturnSpec]
@@ -213,11 +245,15 @@ class FunctionSpec(BaseModel):
 
 
 class ModuleSpec(BaseModel):
+    """Module container holding one or more functions."""
+
     name: str
     funcs: List[FunctionSpec]
 
 
 class HelionJsonSpec(BaseModel):
+    """Root payload wrapper containing the schema version and module."""
+
     version: int
     module: ModuleSpec
 

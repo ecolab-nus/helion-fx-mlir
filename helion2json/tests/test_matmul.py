@@ -83,13 +83,14 @@ def test_matmul_kernel_to_json():
                                     }
                                 },
                             ],
-                            "attrs": {"alpha": 1.0, "beta": 1.0},
+                            "attrs": {"alpha": 1, "beta": 1},
                         },
                         {"op": "hl.tile.end"},
                         {
                             "op": "hl.store_slice",
                             "dst": "out",
                             "offsets": ["tile_m", "tile_n"],
+                            "sizes": ["size(tile_m)", "size(tile_n)"],
                             "src": "acc",
                         },
                         {"op": "hl.tile.end"},
