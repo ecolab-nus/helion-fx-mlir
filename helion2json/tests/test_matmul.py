@@ -5,15 +5,17 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[2]
-for path in (PACKAGE_ROOT, REPO_ROOT):
+EXAMPLES_ROOT = REPO_ROOT / "examples"
+for path in (EXAMPLES_ROOT, PACKAGE_ROOT, REPO_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
 import json
+import pytest
 import torch
 
 import helion_matmul
-from helion2json import dump_kernel_json, export_kernel
+from helion2json import ValidationError, dump_kernel_json, export_kernel, validate_spec
 
 
 def test_matmul_kernel_to_json():
@@ -99,6 +101,8 @@ def test_matmul_kernel_to_json():
     }
 
     assert spec == expected
+    # Ensure schema validation passes on the exporter output.
+    validate_spec(spec)
 
 
 def test_dump_kernel_json_reuses_cached_binding(tmp_path: Path):
@@ -113,3 +117,9 @@ def test_dump_kernel_json_reuses_cached_binding(tmp_path: Path):
 
     on_disk = json.loads(output_path.read_text(encoding="utf-8"))
     assert on_disk == expected
+
+
+def test_validate_spec_rejects_invalid_payload():
+    invalid = {"version": 1}
+    with pytest.raises(ValidationError):
+        validate_spec(invalid)

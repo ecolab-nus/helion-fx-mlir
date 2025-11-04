@@ -8,9 +8,11 @@ from typing import Any, Iterable, Mapping, Sequence
 import torch
 import torch.fx as fx
 from helion._compiler.device_ir import DeviceIR, ForLoopGraphInfo
-from helion.runtime.kernel import BoundKernel, Kernel
 from helion.language import _tracing_ops
 from helion.language.memory_ops import load
+from helion.runtime.kernel import BoundKernel, Kernel
+
+from .schema import validate_spec
 
 DTYPE_ALIASES: dict[torch.dtype, str] = {
     torch.float16: "f16",
@@ -300,7 +302,7 @@ def _export_from_bound(bound: BoundKernel, *, module_name: str) -> dict[str, Any
 
     body.append({"op": "hl.return", "values": ["out"]})
 
-    return {
+    payload = {
         "version": 1,
         "module": {
             "name": module_name,
@@ -314,6 +316,8 @@ def _export_from_bound(bound: BoundKernel, *, module_name: str) -> dict[str, Any
             ],
         },
     }
+    validate_spec(payload)
+    return payload
 
 
 def _pick_cached_bound_kernel(cache: Mapping[object, BoundKernel]) -> BoundKernel | None:
