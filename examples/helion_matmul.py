@@ -33,7 +33,7 @@ _SRC_ROOT = _REPO_ROOT / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
-from helion_fx_mlir import generate_plan_stage0_mlir, validate_with_mlir_opt
+from helion_fx_mlir import generate_plan_stage0_mlir, validate_with_helion_opt
 
 
 # %%
@@ -185,11 +185,11 @@ def main() -> None:
     print("=== MLIR Dump ===")
     print(mlir_text)
 
-    result = validate_with_mlir_opt(mlir_text)
+    result = validate_with_helion_opt(mlir_text)
     if result.returncode != 0:
         print(result.stderr, file=sys.stderr)
-        raise SystemExit("mlir-opt validation failed (see stderr above).")
-    print("mlir-opt validation succeeded.\n")
+        raise SystemExit("helion-opt validation failed (see stderr above).")
+    print("helion-opt validation succeeded.\n")
 
     # autotune(1024, 1024, 1024)
     # check(1024, 1024, 1024)

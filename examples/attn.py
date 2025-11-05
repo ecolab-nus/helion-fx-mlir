@@ -11,7 +11,7 @@ _SYS_SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SYS_SRC) not in sys.path:
     sys.path.insert(0, str(_SYS_SRC))
 
-from helion_fx_mlir import generate_plan_stage0_mlir, validate_with_mlir_opt
+from helion_fx_mlir import generate_plan_stage0_mlir, validate_with_helion_opt
 
 
 @helion.kernel(
@@ -66,7 +66,7 @@ def main() -> None:
     mlir_text = generate_plan_stage0_mlir(bound, kernel_name="attention")
     print("=== MLIR Dump ===")
     print(mlir_text)
-    res = validate_with_mlir_opt(mlir_text)
+    res = validate_with_helion_opt(mlir_text)
     if res.returncode != 0:
         raise SystemExit(res.stderr)
 

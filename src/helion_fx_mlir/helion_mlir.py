@@ -24,7 +24,13 @@ if TYPE_CHECKING:
     from helion.runtime.kernel import BoundKernel
     from torch import Tensor
 
-MLIR_OPT_FALLBACK = Path("/mnt/fast/llvm-mlir/bin/mlir-opt")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+HELION_OPT_CANDIDATES = [
+    REPO_ROOT / "build" / "mlir" / "helion-opt",
+    REPO_ROOT / "build" / "bin" / "helion-opt",
+    Path("/mnt/fast/llvm-mlir/bin/helion-opt"),
+    Path("/mnt/fast/llvm-mlir/bin/mlir-opt"),
+]
 
 
 class _MLIRBuilder:
@@ -134,13 +140,15 @@ def generate_plan_stage0_mlir(
     builder.push()
 
     out_value = builder.fresh("out")
+    alloc_attrs = _format_attr_dict({"shape": full_shape_attr})
     builder.emit(
-        f'{out_value} = "helion.alloc_like"(%arg0) {{shape = {full_shape_attr}}} : ({func_tensor_type}) -> {func_tensor_type}'
+        f'{out_value} = "helion.alloc_like"(%arg0){alloc_attrs} : ({func_tensor_type}) -> {func_tensor_type}'
     )
 
     acc_seed = builder.fresh("acc_init")
+    zero_attrs = _format_attr_dict({"shape": tile_shape_attr, "dtype": element_type})
     builder.emit(
-        f'{acc_seed} = "helion.zero_tile"() {{shape = {tile_shape_attr}, dtype = "{element_type}"}} : () -> {func_tensor_type}'
+        f'{acc_seed} = "helion.zero_tile"(){zero_attrs} : () -> {func_tensor_type}'
     )
 
     c0 = _emit_index_constant(builder, 0)
@@ -265,15 +273,16 @@ def generate_plan_stage0_mlir(
         )
         lhs_meta = _format_dynamic_tensor_meta(lhs_tile_m_size, lhs_tile_k_size, element_type)
         lhs_fx_attr = fx_names.get("lhs_load")
+        lhs_attrs = _format_attr_dict(
+            {
+                "tile": lhs_indices,
+                "sizes": tile_shape_attr,
+                "tensor_meta": lhs_meta,
+                "fx_node": _format_string_attr(lhs_fx_attr) if lhs_fx_attr is not None else None,
+            }
+        )
         builder.emit(
-            f'{lhs_tile} = "helion.load_tile_dynamic"(%arg0, {lhs_tile_m_size}, {lhs_tile_k_size}) {{tile = {lhs_indices}, sizes = {tile_shape_attr}, '
-            f"tensor_meta = {lhs_meta}"
-            + (
-                f", fx_node = {_format_string_attr(lhs_fx_attr)}"
-                if lhs_fx_attr is not None
-                else ""
-            )
-            + f"}} : ({func_tensor_type}, index, index) -> {func_tensor_type}"
+            f'{lhs_tile} = "helion.load_tile_dynamic"(%arg0, {lhs_tile_m_size}, {lhs_tile_k_size}){lhs_attrs} : ({func_tensor_type}, index, index) -> {func_tensor_type}'
         )
 
         rhs_tile_n_size = _choose_tile_size(builder, outer_tile_sizes, loop_map, "tile_n")
@@ -283,28 +292,28 @@ def generate_plan_stage0_mlir(
         )
         rhs_meta = _format_dynamic_tensor_meta(lhs_tile_k_size, rhs_tile_n_size, element_type)
         rhs_fx_attr = fx_names.get("rhs_load")
+        rhs_attrs = _format_attr_dict(
+            {
+                "tile": rhs_indices,
+                "sizes": tile_shape_attr,
+                "tensor_meta": rhs_meta,
+                "fx_node": _format_string_attr(rhs_fx_attr) if rhs_fx_attr is not None else None,
+            }
+        )
         builder.emit(
-            f'{rhs_tile} = "helion.load_tile_dynamic"(%arg1, {lhs_tile_k_size}, {rhs_tile_n_size}) {{tile = {rhs_indices}, sizes = {tile_shape_attr}, '
-            f"tensor_meta = {rhs_meta}"
-            + (
-                f", fx_node = {_format_string_attr(rhs_fx_attr)}"
-                if rhs_fx_attr is not None
-                else ""
-            )
-            + f"}} : ({func_tensor_type}, index, index) -> {func_tensor_type}"
+            f'{rhs_tile} = "helion.load_tile_dynamic"(%arg1, {lhs_tile_k_size}, {rhs_tile_n_size}){rhs_attrs} : ({func_tensor_type}, index, index) -> {func_tensor_type}'
         )
 
         acc_next = builder.fresh("acc")
         addmm_fx_attr = fx_names.get("addmm")
+        call_attrs = _format_attr_dict(
+            {
+                "fn_name": _format_string_attr("aten.addmm"),
+                "fx_node": _format_string_attr(addmm_fx_attr) if addmm_fx_attr is not None else None,
+            }
+        )
         builder.emit(
-            f'{acc_next} = "helion.call_torch"(%acc_iter, {lhs_tile}, {rhs_tile}) '
-            f'{{fn_name = "aten.addmm"'
-            + (
-                f", fx_node = {_format_string_attr(addmm_fx_attr)}"
-                if addmm_fx_attr is not None
-                else ""
-            )
-            + f"}} : ({func_tensor_type}, {func_tensor_type}, {func_tensor_type}) -> {func_tensor_type}"
+            f'{acc_next} = "helion.call_torch"(%acc_iter, {lhs_tile}, {rhs_tile}){call_attrs} : ({func_tensor_type}, {func_tensor_type}, {func_tensor_type}) -> {func_tensor_type}'
         )
         builder.emit(f"affine.yield {acc_next} : {func_tensor_type}")
         builder.pop()
@@ -314,25 +323,27 @@ def generate_plan_stage0_mlir(
     phi_fx_name = root_fx_info.get("phi")
     if phi_fx_name is not None:
         phi_result = builder.fresh("phi")
+        phi_attrs = _format_attr_dict({"fx_node": _format_string_attr(phi_fx_name)})
         builder.emit(
-            f'{phi_result} = "helion.phi"({acc_seed}, {current_acc}) '
-            + f'{{fx_node = {_format_string_attr(phi_fx_name)}}} '
-            + f": ({func_tensor_type}, {func_tensor_type}) -> {func_tensor_type}"
+            f'{phi_result} = "helion.phi"({acc_seed}, {current_acc}){phi_attrs} : ({func_tensor_type}, {func_tensor_type}) -> {func_tensor_type}'
         )
         current_acc = phi_result
 
     store_tile_m_size = _choose_tile_size(builder, outer_tile_sizes, loop_map, "tile_m")
     store_tile_n_size = _choose_tile_size(builder, outer_tile_sizes, loop_map, "tile_n")
     store_meta = _format_dynamic_tensor_meta(store_tile_m_size, store_tile_n_size, element_type)
-    builder.emit(
-        f'"helion.store_tile_dynamic"({out_value}, {current_acc}, {store_tile_m_size}, {store_tile_n_size}) {{tile = {_format_indices_attr([outer_iv_m, outer_iv_n])}, '
-        f"sizes = {tile_shape_attr}, tensor_meta = {store_meta}"
-        + (
-            f", fx_node = {_format_string_attr(root_fx_info.get('store'))}"
+    store_attrs = _format_attr_dict(
+        {
+            "tile": _format_indices_attr([outer_iv_m, outer_iv_n]),
+            "sizes": tile_shape_attr,
+            "tensor_meta": store_meta,
+            "fx_node": _format_string_attr(root_fx_info.get("store"))
             if root_fx_info.get("store") is not None
-            else ""
-        )
-        + f"}} "
+            else None,
+        }
+    )
+    builder.emit(
+        f'"helion.store_tile_dynamic"({out_value}, {current_acc}, {store_tile_m_size}, {store_tile_n_size}){store_attrs} '
         f": ({func_tensor_type}, {func_tensor_type}, index, index) -> ()"
     )
 
@@ -348,24 +359,31 @@ def generate_plan_stage0_mlir(
     return builder.build()
 
 
-def validate_with_mlir_opt(
+def validate_with_helion_opt(
     mlir_text: str,
     *,
-    mlir_opt_path: str | Path | None = None,
+    opt_path: str | Path | None = None,
     extra_args: Iterable[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run `mlir-opt` to confirm the emitted IR parses."""
+    """Run `helion-opt` (falling back to `mlir-opt`) to confirm the emitted IR parses."""
 
-    if mlir_opt_path is None:
-        mlir_opt_path = MLIR_OPT_FALLBACK
+    tool_candidates: Iterable[Path] = HELION_OPT_CANDIDATES if opt_path is None else [Path(opt_path)]
 
-    tool = Path(mlir_opt_path)
-    if not tool.exists():
+    tool: Path | None = None
+    for candidate in tool_candidates:
+        if candidate.exists():
+            tool = candidate
+            break
+
+    if tool is None:
         raise FileNotFoundError(
-            f"mlir-opt not found at {tool}. Adjust MLIR_OPT_PATH or install MLIR."
+            "Unable to locate `helion-opt` or `mlir-opt`. "
+            "Pass `mlir_opt_path` explicitly once the project is built."
         )
 
-    args = [str(tool), "-allow-unregistered-dialect"]
+    args = [str(tool)]
+    if tool.name == "mlir-opt":
+        args.append("-allow-unregistered-dialect")
     if extra_args:
         args.extend(extra_args)
 
@@ -437,16 +455,16 @@ def _format_tensor_type(shape: Sequence[int | None], element_type: str) -> str:
 
 def _format_shape_attr(shape: Sequence[int | None]) -> str:
     if not shape:
-        return '"[]"'
-    body = ", ".join("?" if dim is None else str(dim) for dim in shape)
-    return f'"[{body}]"'
+        return "[]"
+    body = ", ".join(str(dim) if dim is not None else "-1" for dim in shape)
+    return f"[{body}]"
 
 
 def _format_indices_attr(indices: Sequence[str | None]) -> str:
     if not indices:
-        return '"[]"'
-    body = ", ".join(index if index is not None else "?" for index in indices)
-    return f'"[{body}]"'
+        return "[]"
+    body = ", ".join(_format_string_attr(index if index is not None else "?") for index in indices)
+    return f"[{body}]"
 
 
 def _format_tensor_meta(tensor: "Tensor", *, override_shape: Sequence[int | None] | None = None) -> str:
@@ -464,6 +482,13 @@ def _format_string_attr(value: str | None) -> str:
     return f'"{escaped}"'
 
 
+def _format_attr_dict(attrs: dict[str, str | None]) -> str:
+    items = [f"{key} = {value}" for key, value in attrs.items() if value is not None]
+    if not items:
+        return ""
+    return " {" + ", ".join(items) + "}"
+
+
 def _emit_index_constant(builder: _MLIRBuilder, value: int) -> str:
     name = builder.fresh(f"c{value}_")
     builder.emit(f"{name} = arith.constant {value} : index")
@@ -475,7 +500,7 @@ def _format_dynamic_tensor_meta(
     dim1: str,
     element_type: str,
 ) -> str:
-    return f'"[{dim0}, {dim1}]":{element_type}'
+    return _format_string_attr(f"[{dim0}, {dim1}]:{element_type}")
 
 
 def _emit_dynamic_tile_size(
