@@ -24,3 +24,5 @@ torchaudio
 triton>=3.5 ; sys_platform == "linux"
 helion ; sys_platform == "linux"
 pydantic>=1.10,<2
+packaging
+pytest
