@@ -68,7 +68,9 @@ def main() -> None:
     print(mlir_text)
     res = validate_with_helion_opt(mlir_text)
     if res.returncode != 0:
-        raise SystemExit(res.stderr)
+        print(res.stderr, file=sys.stderr)
+        raise SystemExit("helion-opt validation failed (see stderr above).")
+    print("helion-opt validation succeeded.\n")
 
 
 if __name__ == "__main__":
