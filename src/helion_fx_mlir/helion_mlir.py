@@ -221,7 +221,7 @@ def generate_plan_stage0_mlir(
         if loop_dim is not None and tile_const is not None:
             iv_name = iv_names[idx]
             actual = _emit_dynamic_tile_size(
-                builder, iv_name, loop_dim, tile_const, loop["name"]
+                builder, iv_name, loop_dim, loop["tile_size"], loop["name"]
             )
             outer_tile_sizes[loop["name"]] = actual
         elif tile_const is not None:
@@ -262,7 +262,7 @@ def generate_plan_stage0_mlir(
         tile_k_size = loop.get("tile_const")
         if loop_dim is not None and loop.get("tile_const") is not None:
             tile_k_size = _emit_dynamic_tile_size(
-                builder, reduction_iv, loop_dim, loop["tile_const"], loop["name"]
+                builder, reduction_iv, loop_dim, loop["tile_size"], loop["name"]
             )
 
         lhs_tile_m_size = _choose_tile_size(builder, outer_tile_sizes, loop_map, "tile_m")
@@ -507,17 +507,14 @@ def _emit_dynamic_tile_size(
     builder: _MLIRBuilder,
     iv: str,
     dim: str,
-    tile_const: str,
+    tile_size: int,
     hint: str,
 ) -> str:
-    offset = builder.fresh(f"{hint}_offset")
-    builder.emit(f"{offset} = arith.muli {iv}, {tile_const} : index")
-    remain = builder.fresh(f"{hint}_remain")
-    builder.emit(f"{remain} = arith.subi {dim}, {offset} : index")
-    cmp = builder.fresh(f"{hint}_cmp")
-    builder.emit(f"{cmp} = arith.cmpi slt, {remain}, {tile_const} : index")
     size = builder.fresh(f"{hint}_size")
-    builder.emit(f"{size} = arith.select {cmp}, {remain}, {tile_const} : index")
+    map_str = f"affine_map<(d0)[s0] -> ({tile_size}, s0 - d0 * {tile_size})>"
+    builder.emit(
+        f"{size} = affine.min {map_str}({iv})[{dim}]"
+    )
     return size
 
 

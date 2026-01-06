@@ -29,7 +29,7 @@ Each operation retains the originating FX node name (`fx_node = "load"`, `"store
 ## Status & Next Steps
 
 - ✔️ **Loop topology**: reconstructed from Helion’s `DeviceIR` (supports multiple roots / nested `_for_loop` blocks).
-- ✔️ **Dynamic bounds**: all tile sizes/bounds are SSA-driven, enabling partial tile handling.
+- ✔️ **Dynamic bounds**: tile sizes are handled via `affine.min` with symbolic tile sizes, enabling partial tile handling.
 - ✔️ **FX provenance**: node names are threaded through attributes for debugging and later lowering.
 - ✔️ **Dialect integration**: the bespoke `helion.*` ops are defined in C++ and registered via `helion-opt`.
 - ⏳ **Math lowering**: arithmetic ops (`aten.addmm`, reductions, softmax pieces) are still opaque.
