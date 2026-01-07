@@ -130,45 +130,6 @@ def check(m: int, k: int, n: int) -> None:
     )
 
 
-# %%
-def matmul_tritonbench(
-    tb_op: object, a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None
-) -> Callable:
-    """
-    Wrapper for tritonbench that matches its interface.
-    Args:
-        tb_op: TritonBench operator instance
-        a (torch.Tensor): Left matrix.
-        b (torch.Tensor): Right matrix.
-        bias (torch.Tensor or None): Optional bias to add in the epilogue.
-    Returns:
-        Callable: A callable that runs the matmul kernel with or without bias.
-    """
-    if bias is not None:
-        # For gemm with bias, use matmul_autograd and add bias
-        return lambda: matmul_autograd(a, b) + bias
-    return lambda: matmul_autograd(a, b)
-
-
-def addmm_tritonbench(
-    tb_op: object, bias: Tensor, mat1: Tensor, mat2: Tensor
-) -> Callable:
-    """
-    Wrapper for tritonbench that performs a matrix multiplication of the matrices
-    `mat1` and `mat2` followed by adding `bias` to the result.
-    Args:
-        bias (torch.Tensor): Bias to add in the epilogue.
-        mat1 (torch.Tensor): Left matrix.
-        mat2 (torch.Tensor): Right matrix.
-    Returns:
-        Callable: A callable that runs the addmm autograd function with bias.
-    """
-    return lambda: addmm_autograd(bias, mat1, mat2)
-
-
-
-
-# %%
 def main() -> None:
     """
     Main function to run autotuning (commented out) and correctness checks.
