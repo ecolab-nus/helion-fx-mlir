@@ -77,10 +77,10 @@ class LoweringContext:
     element_type: str = "f32"
     tensor_type: str = "tensor<?x?xf32>"
     
-    # Dimension SSA values
-    dim_m: str | None = None
-    dim_n: str | None = None
-    dim_k: str | None = None
+    # Dimension SSA values (or concrete int values)
+    dim_m: str | int | None = None
+    dim_n: str | int | None = None
+    dim_k: str | int | None = None
     
     # Output tensor
     out_value: str | None = None
@@ -96,8 +96,8 @@ class LoweringContext:
     # Dynamic tile sizes computed inside loops (name -> SSA value)
     outer_tile_sizes: dict[str, str] = field(default_factory=dict)
     
-    # Dimension to SSA value mapping
-    dims_map: dict[str, str] = field(default_factory=dict)
+    # Dimension to SSA value (or int) mapping
+    dims_map: dict[str, str | int] = field(default_factory=dict)
     
     # FX node name to MLIR SSA value mapping
     fx_value_map: dict[str, str] = field(default_factory=dict)

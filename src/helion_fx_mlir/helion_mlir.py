@@ -171,7 +171,7 @@ def generate_plan_stage0_mlir(
 
 
 def _emit_dimension_queries(ctx: LoweringContext) -> None:
-    """Emit dimension values as arith.constant (known from BoundKernel)."""
+    """Emit dimension values as arith.constant or store as int if known."""
     builder = ctx.builder
     
     # Get concrete dimension values from loop info
@@ -181,23 +181,45 @@ def _emit_dimension_queries(ctx: LoweringContext) -> None:
     # Get M dimension from tile_m loop
     tile_m_loop = loop_map.get("tile_m")
     if tile_m_loop:
-        ctx.dim_m = builder.emit_index_constant(tile_m_loop.total_extent)
+        # If extent is concrete (int), store it directly. Otherwise emit constant.
+        # But wait, BoundKernel extents are usually integers even for dynamic shapes 
+        # unless they are SymInts.
+        # The goal is: if we KNOW it's a fixed integer at compile time (from BoundKernel),
+        # we can just use that integer in affine maps.
+        
+        # However, for true dynamic shapes support in the future, we might want to read from
+        # the tensor dims. But for now, we follow the user request to inline the values
+        # found in the BoundKernel (which are concrete for the bound arguments).
+        
+        if isinstance(tile_m_loop.total_extent, int):
+            ctx.dim_m = tile_m_loop.total_extent
+        else:
+            # Fallback for symbolic (though current BoundKernel usually resolves to int or SymInt)
+            # If it's SymInt, we probably still want to use it as a symbol or inline it 
+            # if the MLIR builder supports it. 
+            # For now, let's treat non-ints as requiring SSA values (which we don't have for dims easily yet
+            # without reading from tensor).
+            # But wait, previous code did `builder.emit_index_constant(tile_m_loop.total_extent)`.
+            # If total_extent is a SymInt, emit_index_constant might fail or produce a constant op?
+            # Actually, `emit_index_constant` expects an int.
+            # So `total_extent` must be int compatible here.
+            ctx.dim_m = int(tile_m_loop.total_extent)
     else:
-        ctx.dim_m = builder.emit_index_constant(0)
+        ctx.dim_m = 0
     
     # Get K dimension from tile_k loop
     tile_k_loop = loop_map.get("tile_k")
     if tile_k_loop:
-        ctx.dim_k = builder.emit_index_constant(tile_k_loop.total_extent)
+        ctx.dim_k = int(tile_k_loop.total_extent)
     else:
-        ctx.dim_k = builder.emit_index_constant(0)
+        ctx.dim_k = 0
     
     # Get N dimension from tile_n loop
     tile_n_loop = loop_map.get("tile_n")
     if tile_n_loop:
-        ctx.dim_n = builder.emit_index_constant(tile_n_loop.total_extent)
+        ctx.dim_n = int(tile_n_loop.total_extent)
     else:
-        ctx.dim_n = builder.emit_index_constant(0)
+        ctx.dim_n = 0
 
 
 def _emit_loop_bounds(ctx: LoweringContext) -> None:
@@ -217,11 +239,19 @@ def _emit_loop_bounds(ctx: LoweringContext) -> None:
             
             if loop_dim is not None:
                 # Compute trip count with ceildiv
-                trip_count_ssa = builder.emit_affine_apply(
-                    "()[s0, s1] -> (s0 ceildiv s1)",
-                    [],
-                    [loop_dim, tile_ssa],
-                )
+                if isinstance(loop_dim, int):
+                    # Inline loop_dim
+                    trip_count_ssa = builder.emit_affine_apply(
+                        f"()[s0] -> ({loop_dim} ceildiv s0)",
+                        [],
+                        [tile_ssa],
+                    )
+                else:
+                    trip_count_ssa = builder.emit_affine_apply(
+                        "()[s0, s1] -> (s0 ceildiv s1)",
+                        [],
+                        [loop_dim, tile_ssa],
+                    )
                 loop.trip_count_ssa = trip_count_ssa
             else:
                 loop.trip_count_ssa = tile_ssa
@@ -230,17 +260,34 @@ def _emit_loop_bounds(ctx: LoweringContext) -> None:
                 f"block_id={loop.block_id} {loop.name} size=SYMBOLIC extent={loop.total_extent} tiles=dynamic"
             )
         elif loop_dim is not None:
-            # Emit tile size constant
+            # Emit tile size constant - still useful for other things or inline?
+            # User wants to avoid arith.constant for SHAPES. 
+            # Tile sizes are config parameters, usually constant is fine, but can also be inlined.
+            # Let's keep tile size as constant SSA for reusable clarity, or inline it if requested?
+            # The prompt said "shapes of inputs ... use directly the value hard-coded inline".
+            # It didn't explicitly forbid tile size constants, but consistently inlining everything is better.
+            
+            # However, `loop.tile_const` is expected to be an SSA value by other parts (e.g. `_emit_dynamic_tile_size`).
+            # Let's create the constant for tile size as before, but inline the DIMENSION.
+            
             tile_const = builder.fresh(f"{loop.name}_tile")
             builder.emit(f"{tile_const} = arith.constant {loop.tile_size} : index")
             loop.tile_const = tile_const
             
             # Compute trip count with ceildiv
-            trip_count_ssa = builder.emit_affine_apply(
-                "()[s0, s1] -> (s0 ceildiv s1)",
-                [],
-                [loop_dim, tile_const],
-            )
+            if isinstance(loop_dim, int):
+                # Inline loop_dim
+                trip_count_ssa = builder.emit_affine_apply(
+                    f"()[s0] -> ({loop_dim} ceildiv s0)",
+                    [],
+                    [tile_const],
+                )
+            else:
+                trip_count_ssa = builder.emit_affine_apply(
+                    "()[s0, s1] -> (s0 ceildiv s1)",
+                    [],
+                    [loop_dim, tile_const],
+                )
             loop.trip_count_ssa = trip_count_ssa
             
             builder.emit_comment(
@@ -378,7 +425,7 @@ def _emit_reduction_loops(ctx: LoweringContext) -> None:
 
 
 def _compute_reduction_trip_bound(
-    ctx: LoweringContext, loop: LoopInfo, loop_dim: str | None
+    ctx: LoweringContext, loop: LoopInfo, loop_dim: str | int | None
 ) -> str:
     """Compute the trip bound for a reduction loop."""
     builder = ctx.builder
@@ -390,11 +437,18 @@ def _compute_reduction_trip_bound(
         loop.tile_const = tile_ssa
         
         if loop_dim is not None:
-            trip_count_ssa = builder.emit_affine_apply(
-                "()[s0, s1] -> (s0 ceildiv s1)",
-                [],
-                [loop_dim, tile_ssa],
-            )
+            if isinstance(loop_dim, int):
+                trip_count_ssa = builder.emit_affine_apply(
+                    f"()[s0] -> ({loop_dim} ceildiv s0)",
+                    [],
+                    [tile_ssa],
+                )
+            else:
+                trip_count_ssa = builder.emit_affine_apply(
+                    "()[s0, s1] -> (s0 ceildiv s1)",
+                    [],
+                    [loop_dim, tile_ssa],
+                )
             loop.trip_count_ssa = trip_count_ssa
             return trip_count_ssa
         else:
@@ -405,11 +459,18 @@ def _compute_reduction_trip_bound(
         builder.emit(f"{tile_const} = arith.constant {loop.tile_size} : index")
         loop.tile_const = tile_const
         
-        trip_count_ssa = builder.emit_affine_apply(
-            "()[s0, s1] -> (s0 ceildiv s1)",
-            [],
-            [loop_dim, tile_const],
-        )
+        if isinstance(loop_dim, int):
+            trip_count_ssa = builder.emit_affine_apply(
+                f"()[s0] -> ({loop_dim} ceildiv s0)",
+                [],
+                [tile_const],
+            )
+        else:
+            trip_count_ssa = builder.emit_affine_apply(
+                "()[s0, s1] -> (s0 ceildiv s1)",
+                [],
+                [loop_dim, tile_const],
+            )
         loop.trip_count_ssa = trip_count_ssa
         return trip_count_ssa
     else:
@@ -418,7 +479,7 @@ def _compute_reduction_trip_bound(
 
 
 def _compute_reduction_tile_size(
-    ctx: LoweringContext, loop: LoopInfo, loop_dim: str | None
+    ctx: LoweringContext, loop: LoopInfo, loop_dim: str | int | None
 ) -> str:
     """Compute the tile size for the current reduction iteration."""
     builder = ctx.builder
@@ -589,11 +650,17 @@ def _emit_dynamic_tile_size(
 def _emit_dynamic_tile_size_symbolic(
     builder: MLIRBuilder,
     iv: str,
-    dim: str,
+    dim: str | int,
     tile_size_ssa: str,
     hint: str,
 ) -> str:
     """Emit a dynamic tile size computation for symbolic tile sizes."""
+    if isinstance(dim, int):
+        return builder.emit_affine_min(
+            f"(d0)[s0] -> (s0, {dim} - d0 * s0)",
+            [iv],
+            [tile_size_ssa],
+        )
     return builder.emit_affine_min(
         "(d0)[s0, s1] -> (s1, s0 - d0 * s1)",
         [iv],
