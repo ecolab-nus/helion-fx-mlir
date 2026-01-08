@@ -102,29 +102,43 @@ def generate_plan_stage0_mlir(
     func_args = ctx.get_func_signature_args()
     symbolic_tile_args = ctx.get_symbolic_tile_args()
     
-    # Determine result type (use first tensor arg's type as template)
-    tensor_args = ctx.get_tensor_args()
-    result_type = tensor_args[0].mlir_type if tensor_args else ctx.tensor_type
+    # Determine result type with concrete output shape [M, N]
+    result_type = format_tensor_type([ctx.m_extent, ctx.n_extent], ctx.element_type)
     
     # Emit function start
     builder.emit_func_start(kernel_name, func_args, result_type)
     
     # Emit get_module_attribute ops for each symbolic tile size
+    # Map loop names to dimension letters for block_* naming
+    def loop_name_to_dim(name: str) -> str:
+        if name in {"tile_m", "m"}:
+            return "m"
+        elif name in {"tile_n", "n"}:
+            return "n"
+        elif name in {"tile_k", "k"}:
+            return "k"
+        elif name in {"tile_b", "b"}:
+            return "b"
+        return name.lower()
+    
     for sym_arg in symbolic_tile_args:
         loop_name = sym_arg["name"]
-        attr_name = f"loom.{loop_name}"
-        ssa = builder.emit_get_module_attribute(attr_name, f"{loop_name}_size")
+        dim_letter = loop_name_to_dim(loop_name)
+        attr_name = f"loom.block_{dim_letter}"
+        ssa = builder.emit_get_module_attribute(attr_name, f"block_{dim_letter}")
         ctx.symbolic_arg_ssa[loop_name] = ssa
-        builder.emit_comment(f"Tile size from module attribute: {attr_name} (block_id={sym_arg['block_id']})")
+        builder.emit_comment(f"Block size from module attribute: {attr_name} (block_id={sym_arg['block_id']})")
     
     # Emit output allocation (using first tensor arg as template)
     lhs_ssa = ctx.get_lhs_tensor_ssa()
     lhs_type = ctx.get_lhs_tensor_type()
     
     ctx.out_value = builder.fresh("out")
+    # Output tensor has shape [M, N] 
+    output_type = format_tensor_type([ctx.m_extent, ctx.n_extent], ctx.element_type)
     alloc_attrs = format_attr_dict({"shape": full_shape_attr})
     builder.emit(
-        f'{ctx.out_value} = "helion.alloc_like"({lhs_ssa}){alloc_attrs} : ({lhs_type}) -> {lhs_type}'
+        f'{ctx.out_value} = "helion.alloc_like"({lhs_ssa}){alloc_attrs} : ({lhs_type}) -> {output_type}'
     )
     
     # Emit accumulator initialization
@@ -137,9 +151,7 @@ def generate_plan_stage0_mlir(
     # Emit dimension queries
     _emit_dimension_queries(ctx)
     
-    # Emit tensor annotations
-    _emit_tensor_annotations(ctx)
-    
+
     # Set up dimension mapping
     ctx.setup_dims_map()
     
@@ -149,8 +161,9 @@ def generate_plan_stage0_mlir(
     # Emit outer parallel loop
     _emit_parallel_loop_structure(ctx, bound_kernel)
     
-    # Emit function end and return
-    builder.emit(f"return {ctx.out_value} : {ctx.tensor_type}")
+    # Emit function end and return (output has shape [M, N])
+    output_type = format_tensor_type([ctx.m_extent, ctx.n_extent], ctx.element_type)
+    builder.emit(f"return {ctx.out_value} : {output_type}")
     builder.emit_func_end()
     builder.emit_module_end()
     
@@ -158,46 +171,33 @@ def generate_plan_stage0_mlir(
 
 
 def _emit_dimension_queries(ctx: LoweringContext) -> None:
-    """Emit tensor.dim operations for tensor dimensions."""
+    """Emit dimension values as arith.constant (known from BoundKernel)."""
     builder = ctx.builder
     
-    # Get tensor argument SSA names
-    lhs_ssa = ctx.get_lhs_tensor_ssa()
-    rhs_ssa = ctx.get_rhs_tensor_ssa()
-    lhs_type = ctx.get_lhs_tensor_type()
-    rhs_type = ctx.get_rhs_tensor_type()
+    # Get concrete dimension values from loop info
+    # The total_extent in each loop IS the dimension size
+    loop_map = ctx.get_loop_map()
     
-    c0 = builder.emit_index_constant(0)
-    c1 = builder.emit_index_constant(1)
+    # Get M dimension from tile_m loop
+    tile_m_loop = loop_map.get("tile_m")
+    if tile_m_loop:
+        ctx.dim_m = builder.emit_index_constant(tile_m_loop.total_extent)
+    else:
+        ctx.dim_m = builder.emit_index_constant(0)
     
-    ctx.dim_m = builder.fresh("dim_m")
-    builder.emit(f"{ctx.dim_m} = tensor.dim {lhs_ssa}, {c0} : {lhs_type}")
+    # Get K dimension from tile_k loop
+    tile_k_loop = loop_map.get("tile_k")
+    if tile_k_loop:
+        ctx.dim_k = builder.emit_index_constant(tile_k_loop.total_extent)
+    else:
+        ctx.dim_k = builder.emit_index_constant(0)
     
-    ctx.dim_k = builder.fresh("dim_k")
-    builder.emit(f"{ctx.dim_k} = tensor.dim {lhs_ssa}, {c1} : {lhs_type}")
-    
-    ctx.dim_n = builder.fresh("dim_n")
-    builder.emit(f"{ctx.dim_n} = tensor.dim {rhs_ssa}, {c1} : {rhs_type}")
-
-
-def _emit_tensor_annotations(ctx: LoweringContext) -> None:
-    """Emit helion.annotate_tensor operations for input tensors."""
-    builder = ctx.builder
-    
-    # Get tensor argument info
-    tensor_args = ctx.get_tensor_args()
-    
-    if len(tensor_args) >= 1:
-        lhs = tensor_args[0]
-        builder.emit(
-            f'"helion.annotate_tensor"({lhs.ssa_name}, {ctx.dim_m}, {ctx.dim_k}) {{name = "{lhs.name}"}} : ({lhs.mlir_type}, index, index) -> ()'
-        )
-    
-    if len(tensor_args) >= 2:
-        rhs = tensor_args[1]
-        builder.emit(
-            f'"helion.annotate_tensor"({rhs.ssa_name}, {ctx.dim_k}, {ctx.dim_n}) {{name = "{rhs.name}"}} : ({rhs.mlir_type}, index, index) -> ()'
-        )
+    # Get N dimension from tile_n loop
+    tile_n_loop = loop_map.get("tile_n")
+    if tile_n_loop:
+        ctx.dim_n = builder.emit_index_constant(tile_n_loop.total_extent)
+    else:
+        ctx.dim_n = builder.emit_index_constant(0)
 
 
 def _emit_loop_bounds(ctx: LoweringContext) -> None:
@@ -462,7 +462,7 @@ def _emit_lhs_load(
     
     builder.emit(
         f'{lhs_tile} = "helion.load_tile_dynamic"({lhs_ssa}, {lhs_tile_m_size}, {tile_k_size}){lhs_attrs} '
-        f": ({lhs_type}, index, index) -> {lhs_type}"
+        f": ({lhs_type}, index, index) -> {ctx.tensor_type}"
     )
     
     return lhs_tile
@@ -495,7 +495,7 @@ def _emit_rhs_load(
     
     builder.emit(
         f'{rhs_tile} = "helion.load_tile_dynamic"({rhs_ssa}, {tile_k_size}, {rhs_tile_n_size}){rhs_attrs} '
-        f": ({rhs_type}, index, index) -> {rhs_type}"
+        f": ({rhs_type}, index, index) -> {ctx.tensor_type}"
     )
     
     return rhs_tile
@@ -557,9 +557,12 @@ def _emit_store_tile(ctx: LoweringContext) -> None:
             if ctx.root_fx_info.get("store") else None,
     })
     
+    # Output tensor has shape [M, N]
+    output_type = format_tensor_type([ctx.m_extent, ctx.n_extent], ctx.element_type)
+    
     builder.emit(
         f'"helion.store_tile_dynamic"({ctx.out_value}, {ctx.current_acc}, {store_tile_m_size}, {store_tile_n_size}){store_attrs} '
-        f": ({ctx.tensor_type}, {ctx.tensor_type}, index, index) -> ()"
+        f": ({output_type}, {ctx.tensor_type}, index, index) -> ()"
     )
 
 

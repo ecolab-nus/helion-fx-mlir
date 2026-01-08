@@ -77,15 +77,21 @@ class MLIRBuilder:
     # Module and function emission
     # -------------------------------------------------------------------------
 
-    def emit_module_start(self, attrs: dict[str, tuple[int, str]] | None = None) -> None:
+    def emit_module_start(self, attrs: dict[str, tuple[object, str]] | None = None) -> None:
         """Emit the start of an MLIR module.
         
         Args:
             attrs: Optional dict of module attributes, mapping name to (value, type).
-                   Example: {"helion.tile_m": (64, "index")}
+                   Example: {"loom.tile_m": (64, "index"), "loom.tensor_dims.x": ('"tile_m,tile_k"', "")}
+                   If type is empty string, the value is emitted as-is (for string attrs).
         """
         if attrs:
-            attr_strs = [f"{name} = {value} : {typ}" for name, (value, typ) in attrs.items()]
+            attr_strs = []
+            for name, (value, typ) in attrs.items():
+                if typ:
+                    attr_strs.append(f"{name} = {value} : {typ}")
+                else:
+                    attr_strs.append(f"{name} = {value}")
             self.emit(f"module attributes {{{', '.join(attr_strs)}}} {{")
         else:
             self.emit("module {")

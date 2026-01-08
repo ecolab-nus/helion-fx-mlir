@@ -58,23 +58,7 @@ def Helion_ZeroTileOp : Helion_Op<"zero_tile"> {
   let results = (outs AnyTensor:$result);
 }
 
-//===----------------------------------------------------------------------===//
-// helion.annotate_tensor
-//===----------------------------------------------------------------------===//
 
-def Helion_AnnotateTensorOp : Helion_Op<"annotate_tensor"> {
-  let summary = "attach Helion metadata to a tensor";
-  let description = [{
-    The `helion.annotate_tensor` op records Helion bookkeeping such as tensor
-    names and dimension SSA values.  It has no results and is intended purely
-    for metadata propagation.
-  }];
-  let arguments = (ins AnyTensor:$value,
-                       Index:$dim0,
-                       Index:$dim1,
-                       StrAttr:$name);
-  let results = (outs);
-}
 
 //===----------------------------------------------------------------------===//
 // helion.load_tile_dynamic

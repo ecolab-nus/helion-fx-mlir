@@ -121,6 +121,11 @@ class LoweringContext:
     # Kernel function arguments (extracted from bound kernel)
     kernel_args: list[KernelArgInfo] = field(default_factory=list)
     
+    # Concrete dimension extents (M, N, K) from loop info
+    m_extent: int | None = None
+    n_extent: int | None = None
+    k_extent: int | None = None
+    
     @classmethod
     def from_bound_kernel(
         cls,
@@ -165,22 +170,52 @@ class LoweringContext:
         
         # Determine element type from first tensor
         element_type = torch_dtype_to_mlir_element_type(lhs.dtype)
-        tensor_type = format_tensor_type([None, None], element_type)
         
-        # Create context
+        # Create context with placeholder tensor_type
         ctx = cls(
             builder=builder,
             bound_kernel=bound_kernel,
             device_ir=device_ir,
             element_type=element_type,
-            tensor_type=tensor_type,
+            tensor_type="",  # Will be set after _build_loop_info
             block_sizes=block_sizes,
             parallel_block_ids=parallel_block_ids,
             kernel_args=kernel_args,
         )
         
-        # Build loop information
+        # Build loop information (this gives us concrete extents)
         ctx._build_loop_info(lhs, rhs)
+        
+        # Now compute concrete tensor types using loop extents
+        loop_map = ctx.get_loop_map()
+        dim_m = loop_map.get("tile_m")
+        dim_n = loop_map.get("tile_n")
+        dim_k = loop_map.get("tile_k")
+        
+        m_extent = dim_m.total_extent if dim_m else None
+        n_extent = dim_n.total_extent if dim_n else None
+        k_extent = dim_k.total_extent if dim_k else None
+        
+        # Keep tensor_type dynamic for intermediate tile operations
+        # (tile sizes are variable, only function args have concrete shapes)
+        ctx.tensor_type = format_tensor_type([None, None], element_type)
+        
+        # Store concrete extents for use in function signature and output allocation
+        ctx.m_extent = m_extent
+        ctx.n_extent = n_extent
+        ctx.k_extent = k_extent
+        
+        # Update kernel_args with concrete shapes for function signature
+        for arg in ctx.kernel_args:
+            if arg.is_tensor:
+                if arg.name == lhs_info.name:
+                    # LHS has shape [M, K]
+                    arg.shape = [m_extent, k_extent]
+                    arg.mlir_type = format_tensor_type([m_extent, k_extent], element_type)
+                elif arg.name == rhs_info.name:
+                    # RHS has shape [K, N]
+                    arg.shape = [k_extent, n_extent]
+                    arg.mlir_type = format_tensor_type([k_extent, n_extent], element_type)
         
         return ctx
     
@@ -329,20 +364,44 @@ class LoweringContext:
         """Get the list of symbolic tile size arguments."""
         return getattr(self, "_symbolic_tile_args", [])
     
-    def get_module_attributes(self) -> dict[str, tuple[int, str]]:
-        """Get tile sizes as module attributes.
+    def get_module_attributes(self) -> dict[str, tuple[object, str]]:
+        """Get block sizes, dimension sizes, and tensor dimension mappings as module attributes.
         
         Returns a dict mapping attribute name to (value, type) for module attributes.
-        Uses a default value (64) for symbolic tile sizes.
+        Uses -1 for undefined (symbolic) block sizes.
+        
+        Naming convention:
+        - loom.block_m, loom.block_n, loom.block_k = tile sizes (BM, BN, BK), -1 if undefined
+        - loom.dim_m, loom.dim_n, loom.dim_k = dimension sizes (M, N, K), -1 if dynamic
+        
+        Tensor dimension mappings (derived from loop access patterns):
+        - loom.tensor_dims.x = "M,K" (for LHS matrix, accessed by tile_m and tile_k)
+        - loom.tensor_dims.y = "K,N" (for RHS matrix, accessed by tile_k and tile_n)
+        - loom.tensor_dims.out = "M,N" (for output, accessed by tile_m and tile_n)
         """
         attrs = {}
         all_loops = self.outer_loops + self.reduction_loops
         
+        # Map loop names to dimension names
+        # tile_m -> M, tile_n -> N, tile_k -> K
+        def loop_name_to_dim(name: str) -> str:
+            if name in {"tile_m", "m"}:
+                return "M"
+            elif name in {"tile_n", "n"}:
+                return "N"
+            elif name in {"tile_k", "k"}:
+                return "K"
+            elif name in {"tile_b", "b"}:
+                return "B"
+            return name.upper()
+        
+        # Emit block sizes with block_* naming (-1 for undefined)
         for loop in all_loops:
-            attr_name = f"loom.{loop.name}"
+            dim_letter = loop_name_to_dim(loop.name).lower()
+            attr_name = f"loom.block_{dim_letter}"
             if loop.is_symbolic:
-                # Use a placeholder value for symbolic sizes
-                attrs[attr_name] = (64, "index")
+                # Use -1 for undefined/symbolic sizes
+                attrs[attr_name] = (-1, "index")
             elif loop.tile_size is not None:
                 attrs[attr_name] = (loop.tile_size, "index")
         
