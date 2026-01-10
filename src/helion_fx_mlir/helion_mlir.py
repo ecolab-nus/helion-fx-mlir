@@ -89,12 +89,11 @@ def generate_plan_stage0_mlir(
     
     # Get tensor arguments
     fake_args = bound_kernel.fake_args
-    tensor_args = ctx.get_tensor_args()
+    lhs, rhs, *_ = fake_args
     
-    # Compute output shape from loop extents or first tensor shape
-    output_shape = _derive_output_shape(ctx, fake_args, tensor_args)
-    ctx.output_shape = output_shape
-    full_shape_attr = format_shape_attr(output_shape)
+    # Compute full output shape
+    full_shape = [as_optional_int(lhs.size(0)), as_optional_int(rhs.size(1))]
+    full_shape_attr = format_shape_attr(full_shape)
     
     # Emit module start with tile size attributes
     module_attrs = ctx.get_module_attributes()
@@ -104,8 +103,8 @@ def generate_plan_stage0_mlir(
     func_args = ctx.get_func_signature_args()
     symbolic_tile_args = ctx.get_symbolic_tile_args()
     
-    # Determine result type from output shape
-    result_type = format_tensor_type(output_shape, ctx.element_type)
+    # Determine result type with concrete output shape [M, N]
+    result_type = format_tensor_type([ctx.m_extent, ctx.n_extent], ctx.element_type)
     
     # Emit function start
     builder.emit_func_start(kernel_name, func_args, result_type)
@@ -121,7 +120,7 @@ def generate_plan_stage0_mlir(
             return "k"
         elif name in {"tile_b", "b"}:
             return "b"
-        return name.replace("tile_", "")
+        return name.lower()
     
     for sym_arg in symbolic_tile_args:
         loop_name = sym_arg["name"]
@@ -132,14 +131,15 @@ def generate_plan_stage0_mlir(
         builder.emit_comment(f"Block size from module attribute: {attr_name} (block_id={sym_arg['block_id']})")
     
     # Emit output allocation (using first tensor arg as template)
-    first_tensor_ssa = ctx.get_tensor_arg_ssa(0) if tensor_args else "%arg0"
-    first_tensor_type = tensor_args[0].mlir_type if tensor_args else ctx.tensor_type
+    lhs_ssa = ctx.get_lhs_tensor_ssa()
+    lhs_type = ctx.get_lhs_tensor_type()
     
     ctx.out_value = builder.fresh("out")
-    output_type = format_tensor_type(output_shape, ctx.element_type)
+    # Output tensor has shape [M, N] 
+    output_type = format_tensor_type([ctx.m_extent, ctx.n_extent], ctx.element_type)
     alloc_attrs = format_attr_dict({"shape": full_shape_attr})
     builder.emit(
-        f'{ctx.out_value} = "helion.alloc_like"({first_tensor_ssa}){alloc_attrs} : ({first_tensor_type}) -> {output_type}'
+        f'{ctx.out_value} = "helion.alloc_like"({lhs_ssa}){alloc_attrs} : ({lhs_type}) -> {output_type}'
     )
     
     # Emit accumulator initialization
@@ -162,55 +162,13 @@ def generate_plan_stage0_mlir(
     # Emit outer parallel loop
     _emit_parallel_loop_structure(ctx, bound_kernel)
     
-    # Emit function end and return
+    # Emit function end and return (output has shape [M, N])
+    output_type = format_tensor_type([ctx.m_extent, ctx.n_extent], ctx.element_type)
     builder.emit(f"return {ctx.out_value} : {output_type}")
     builder.emit_func_end()
     builder.emit_module_end()
     
     return builder.build()
-
-
-def _derive_output_shape(
-    ctx: LoweringContext,
-    fake_args: tuple,
-    tensor_args: list[KernelArgInfo],
-) -> list[int | None]:
-    """Derive the output shape from tensor shapes or loop extents.
-    
-    Strategy:
-    1. For matmul pattern (2 outer loops, no tile_b): use loop extents [M, N]
-    2. For higher-dimensional kernels or when tile_b present: use first input's shape
-    """
-    import torch
-    
-    # Check for matmul pattern: no tile_b and exactly 2 outer loops (tile_m, tile_n)
-    loop_names = {loop.name for loop in ctx.outer_loops}
-    has_batch_dim = "tile_b" in loop_names
-    
-    # For matmul pattern (tile_m, tile_n only), use loop extents
-    if not has_batch_dim and len(ctx.outer_loops) == 2:
-        m_extent = ctx.loop_extents.get("tile_m")
-        n_extent = ctx.loop_extents.get("tile_n")
-        if m_extent is not None and n_extent is not None:
-            return [m_extent, n_extent]
-    
-    # For other patterns (e.g., attention with tile_b, tile_m), 
-    # use the first input tensor's shape as output shape
-    if tensor_args and tensor_args[0].index < len(fake_args):
-        tensor = fake_args[tensor_args[0].index]
-        if hasattr(tensor, 'shape'):
-            return [int(s) if not isinstance(s, torch.SymInt) else None 
-                    for s in tensor.shape]
-    
-    # Fallback: use loop extents
-    output_dims: list[int | None] = []
-    for loop in ctx.outer_loops:
-        if loop.total_extent is not None:
-            output_dims.append(loop.total_extent)
-    if len(output_dims) >= 2:
-        return output_dims
-    
-    return [None, None]
 
 
 def _emit_dimension_queries(ctx: LoweringContext) -> None:
@@ -365,9 +323,6 @@ def _emit_parallel_loop_structure(ctx: LoweringContext, bound_kernel: "BoundKern
     # Extract FX names from the device IR graphs
     _extract_fx_metadata(ctx, bound_kernel)
     
-    # Emit placeholder SSA values for intermediate tensors
-    _emit_intermediate_tensors(ctx, bound_kernel)
-    
     # Emit reduction loops and body
     ctx.current_acc = ctx.acc_seed
     _emit_reduction_loops(ctx)
@@ -418,44 +373,6 @@ def _extract_fx_metadata(ctx: LoweringContext, bound_kernel: "BoundKernel") -> N
     
     root_graph = _first_root_graph(device_ir)
     ctx.root_fx_info = _extract_root_fx_info(root_graph)
-
-
-def _emit_intermediate_tensors(ctx: LoweringContext, bound_kernel: "BoundKernel") -> None:
-    """Emit placeholder SSA values for intermediate tensors.
-    
-    This handles tensors created via reshape/transpose/view that are 
-    referenced in load operations but are not function arguments.
-    """
-    builder = ctx.builder
-    
-    # Collect all tensor names that are function arguments
-    arg_names = {arg.name for arg in ctx.kernel_args if arg.is_tensor}
-    
-    # Find load infos that reference non-argument tensors
-    for load_info in ctx.load_infos:
-        source_name = load_info.source_tensor_name
-        
-        # Skip if this is already a function argument
-        if source_name in arg_names:
-            continue
-        
-        # Skip if we've already emitted this tensor
-        if f"%{source_name}" in ctx.fx_value_map.values():
-            continue
-        
-        # Emit a placeholder tensor operation for this intermediate tensor
-        # In a future version, we could trace back to the actual operations
-        ssa = builder.fresh(source_name)
-        placeholder_attrs = format_attr_dict({
-            "tensor_name": format_string_attr(source_name),
-            "note": format_string_attr("intermediate tensor placeholder"),
-        })
-        builder.emit(
-            f'{ssa} = "helion.intermediate_tensor"(){placeholder_attrs} : () -> {ctx.tensor_type}'
-        )
-        
-        # Store the SSA value for use in loads
-        ctx.fx_value_map[source_name] = ssa
 
 
 def _emit_reduction_loops(ctx: LoweringContext) -> None:
@@ -626,17 +543,8 @@ def _emit_load(
     
     # Get tensor info from kernel args
     tensor_arg = _get_tensor_arg_for_load(ctx, load_info)
-    
-    # Determine tensor SSA - check fx_value_map for intermediate tensors first
-    if tensor_arg:
-        tensor_ssa = tensor_arg.ssa_name
-        tensor_type = tensor_arg.mlir_type
-    elif load_info.source_tensor_name in ctx.fx_value_map:
-        tensor_ssa = ctx.fx_value_map[load_info.source_tensor_name]
-        tensor_type = ctx.tensor_type
-    else:
-        tensor_ssa = f"%{load_info.source_tensor_name}"
-        tensor_type = ctx.tensor_type
+    tensor_ssa = tensor_arg.ssa_name if tensor_arg else f"%{load_info.source_tensor_name}"
+    tensor_type = tensor_arg.mlir_type if tensor_arg else ctx.tensor_type
     
     # Determine tile dimensions based on source tensor
     # For matmul pattern: LHS is [M, K], RHS is [K, N]
@@ -777,15 +685,9 @@ def _emit_store_tile(ctx: LoweringContext) -> None:
     outer_iv_m = outer_ivs[0] if outer_ivs else "%tile_m_iv"
     outer_iv_n = outer_ivs[1] if len(outer_ivs) > 1 else "%tile_n_iv"
     
-    # Get tile sizes for the first two outer loops (may be tile_b, tile_m, etc.)
-    first_loop = ctx.outer_loops[0] if ctx.outer_loops else None
-    second_loop = ctx.outer_loops[1] if len(ctx.outer_loops) > 1 else None
-    
-    store_tile_1 = _choose_tile_size(builder, ctx.outer_tile_sizes, loop_map, 
-                                      first_loop.name if first_loop else "tile_m")
-    store_tile_2 = _choose_tile_size(builder, ctx.outer_tile_sizes, loop_map, 
-                                      second_loop.name if second_loop else "tile_n")
-    store_meta = format_dynamic_tensor_meta(store_tile_1, store_tile_2, ctx.element_type)
+    store_tile_m_size = _choose_tile_size(builder, ctx.outer_tile_sizes, loop_map, "tile_m")
+    store_tile_n_size = _choose_tile_size(builder, ctx.outer_tile_sizes, loop_map, "tile_n")
+    store_meta = format_dynamic_tensor_meta(store_tile_m_size, store_tile_n_size, ctx.element_type)
     
     store_attrs = format_attr_dict({
         "tile": format_indices_attr([outer_iv_m, outer_iv_n]),
@@ -795,11 +697,11 @@ def _emit_store_tile(ctx: LoweringContext) -> None:
             if ctx.root_fx_info.get("store") else None,
     })
     
-    # Use stored output_shape for consistent tensor type
-    output_type = format_tensor_type(ctx.output_shape, ctx.element_type)
+    # Output tensor has shape [M, N]
+    output_type = format_tensor_type([ctx.m_extent, ctx.n_extent], ctx.element_type)
     
     builder.emit(
-        f'"helion.store_tile_dynamic"({ctx.out_value}, {ctx.current_acc}, {store_tile_1}, {store_tile_2}){store_attrs} '
+        f'"helion.store_tile_dynamic"({ctx.out_value}, {ctx.current_acc}, {store_tile_m_size}, {store_tile_n_size}){store_attrs} '
         f": ({output_type}, {ctx.tensor_type}, index, index) -> ()"
     )
 

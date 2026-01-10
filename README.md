@@ -79,17 +79,22 @@ def matmul(x: torch.Tensor, y: torch.Tensor, out: torch.Tensor) -> None:
 Represents the body of the `tile_k` loop.
 ```
 Graph 0: ForLoopGraphInfo
-opcode         name            target                                     args
--------------  --------------  -----------------------------------------  -------------------------------
-...
-call_function  x               <function _host_tensor ...>                ('x',)
-call_function  load            <function load ...>                        (x, [..., block_size_2], ...)
-call_function  y               <function _host_tensor ...>                ('y',)
-call_function  load_1          <function load ...>                        (y, [block_size_2, ...], ...)
-call_function  acc             aten.addmm.default                         (_new_var, load, load_1)
-output         output          output                                     ([acc],)
+opcode         name            target                                     args                                             kwargs
+-------------  --------------  -----------------------------------------  -----------------------------------------------  --------
+placeholder    arg0_1          arg0_1                                     ()                                               {}
+call_function  _new_var        <function _new_var ...>                    (arg0_1,)                                        {}
+call_function  x               <function _host_tensor ...>                ('x',)                                           {}
+call_function  sym_size_int    aten.sym_size.int                          (arg0_1, 0)                                      {}
+call_function  block_size_2    <function _get_symnode ...>                ('block_size_2',)                                {}
+call_function  load            <function load ...>                        (x, [sym_size_int, block_size_2], None, None)    {}
+call_function  y               <function _host_tensor ...>                ('y',)                                           {}
+call_function  sym_size_int_1  aten.sym_size.int                          (arg0_1, 1)                                      {}
+call_function  load_1          <function load ...>                        (y, [block_size_2, sym_size_int_1], None, None)  {}
+call_function  acc             aten.addmm.default                         (_new_var, load, load_1)                         {}
+output         output          output                                     ([acc],)                                         {}
 ```
 - `x`/`y` (`_host_tensor`): References to the input tensors `x` and `y`.
+- `sym_size_int` / `sym_size_int_1`: Extracts `tile_m` and `tile_n` indices from the loop context (`arg0_1`).
 - `load`/`load_1`: Corresponds to `x[tile_m, tile_k]` and `y[tile_k, tile_n]`.
 - `acc` (`aten.addmm`): Corresponds to `torch.addmm(acc, x_tile, y_tile)`.
 - `output`: Returns the updated `acc` for the next iteration.
@@ -98,14 +103,18 @@ output         output          output                                     ([acc]
 Represents the outer loops `tile_m, tile_n` and the reduction accumulation logic.
 ```
 Graph 1: RootGraphInfo
-opcode         name          target                                     args
--------------  ------------  -----------------------------------------  -------------------------------
-call_function  acc           <function full ...>                        (..., 0.0, ...)
-call_function  _for_loop     <function _for_loop ...>                   (0, [0], [x_size1], [acc])
-call_function  getitem       <built-in function getitem>                (_for_loop, 0)
-call_function  _phi          <function _phi ...>                        (acc, getitem)
+opcode         name          target                                     args                                                      kwargs
+-------------  ------------  -----------------------------------------  --------------------------------------------------------  --------
+call_function  block_size_0  <function _get_symnode ...>                ('block_size_0',)                                         {}
+call_function  block_size_1  <function _get_symnode ...>                ('block_size_1',)                                         {}
+call_function  acc           <function full ...>                        ([block_size_0, block_size_1], 0.0, torch.float32, None)  {}
+call_function  x_size1       <function _get_symnode ...>                ('x_size1',)                                              {}
+call_function  _for_loop     <function _for_loop ...>                   (0, [0], [x_size1], [acc])                                {}
+call_function  getitem       <built-in function getitem>                (_for_loop, 0)                                            {}
+call_function  _phi          <function _phi ...>                        (acc, getitem)                                            {}
 call_function  out           <function _host_tensor ...>                ('out',)
-call_function  store         <function store ...>                       (out, ..., _phi, None)
+call_function  store         <function store ...>                       (out, [block_size_0, block_size_1], _phi, None)           {}
+output         output        output                                     (None,)                                                   {}
 ```
 - `acc` (`full`): Corresponds to `hl.zeros(...)`.
 - `_for_loop`: Executes the inner loop over `tile_k`.

@@ -96,9 +96,6 @@ class LoweringContext:
     # e.g., {"tile_m": 128, "tile_n": 256, "tile_k": 128}
     loop_extents: dict[str, int] = field(default_factory=dict)
     
-    # Output shape (derived dynamically)
-    output_shape: list[int | None] = field(default_factory=list)
-    
     # Output tensor
     out_value: str | None = None
     acc_seed: str | None = None
