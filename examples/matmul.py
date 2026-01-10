@@ -144,6 +144,13 @@ def main() -> None:
         g.graph.print_tabular()
     print("\n")
 
+    print("=== Compile Environment ===")
+    env = bound_kernel.env
+    print(f"Block Sizes ({len(env.block_sizes)}):")
+    for bs in env.block_sizes:
+        print(f"  Block {bs.block_id}: Size={bs.size}, Var={bs.var}, Reduction={bs.reduction}, Source={bs.block_size_source}")
+    print("\n")
+
     mlir_text = generate_plan_stage0_mlir(
         bound_kernel,
         kernel_name="matmul",

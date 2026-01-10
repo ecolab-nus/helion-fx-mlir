@@ -128,7 +128,6 @@ def generate_plan_stage0_mlir(
         attr_name = f"loom.block_{dim_letter}"
         ssa = builder.emit_get_module_attribute(attr_name, f"block_{dim_letter}")
         ctx.symbolic_arg_ssa[loop_name] = ssa
-        builder.emit_comment(f"Block size from module attribute: {attr_name} (block_id={sym_arg['block_id']})")
     
     # Emit output allocation (using first tensor arg as template)
     lhs_ssa = ctx.get_lhs_tensor_ssa()
@@ -256,10 +255,6 @@ def _emit_loop_bounds(ctx: LoweringContext) -> None:
                 loop.trip_count_ssa = trip_count_ssa
             else:
                 loop.trip_count_ssa = tile_ssa
-            
-            builder.emit_comment(
-                f"block_id={loop.block_id} {loop.name} size=SYMBOLIC extent={loop.total_extent} tiles=dynamic"
-            )
         elif loop_dim is not None:
             # Emit tile size constant - still useful for other things or inline?
             # User wants to avoid arith.constant for SHAPES. 
@@ -290,23 +285,16 @@ def _emit_loop_bounds(ctx: LoweringContext) -> None:
                     [loop_dim, tile_const],
                 )
             loop.trip_count_ssa = trip_count_ssa
-            
-            builder.emit_comment(
-                f"block_id={loop.block_id} {loop.name} size={loop.tile_size} extent={loop.total_extent} tiles={loop.trip_count}"
-            )
         else:
             loop.trip_count_ssa = str(loop.trip_count)
-            builder.emit_comment(
-                f"block_id={loop.block_id} {loop.name} size={loop.tile_size} extent={loop.total_extent} tiles={loop.trip_count}"
-            )
 
 
 def _emit_parallel_loop_structure(ctx: LoweringContext, bound_kernel: "BoundKernel") -> None:
     """Emit the outer parallel loop and its contents."""
     builder = ctx.builder
     
-    # Build IV names and bounds
-    iv_names = [f"%{loop.name}_iv" for loop in ctx.outer_loops]
+    # Build IV names using block_id pattern for clear block-to-loop correspondence
+    iv_names = [f"%iv_block{loop.block_id}" for loop in ctx.outer_loops]
     for i, loop in enumerate(ctx.outer_loops):
         loop.iv_name = iv_names[i]
     
@@ -338,23 +326,14 @@ def _emit_parallel_loop_structure(ctx: LoweringContext, bound_kernel: "BoundKern
 
 
 def _emit_outer_tile_sizes(ctx: LoweringContext) -> None:
-    """Compute and emit dynamic tile sizes for outer loops."""
-    builder = ctx.builder
+    """Set up tile sizes for outer loops using direct block sizes.
     
+    Note: We don't use affine.min for tile boundary handling. This assumes
+    symbolic shapes where the tile size is always the full block size.
+    """
     for loop in ctx.outer_loops:
-        loop_dim = ctx.dims_map.get(loop.name)
-        
-        if loop_dim is not None and loop.tile_const is not None:
-            if loop.is_symbolic:
-                actual = _emit_dynamic_tile_size_symbolic(
-                    builder, loop.iv_name, loop_dim, loop.tile_const, loop.name
-                )
-            else:
-                actual = _emit_dynamic_tile_size(
-                    builder, loop.iv_name, loop_dim, loop.tile_size, loop.name
-                )
-            ctx.outer_tile_sizes[loop.name] = actual
-        elif loop.tile_const is not None:
+        # Simply use the tile size from the loop (either constant or symbolic SSA)
+        if loop.tile_const is not None:
             ctx.outer_tile_sizes[loop.name] = loop.tile_const
 
 
@@ -364,7 +343,7 @@ def _extract_fx_metadata(ctx: LoweringContext, bound_kernel: "BoundKernel") -> N
     
     for_graph = _first_graph_with_block_ids(device_ir)
     if for_graph is not None:
-        load_infos, other_names = _extract_load_infos(for_graph, ctx.kernel_args)
+        load_infos, other_names = _extract_load_infos(for_graph, ctx.kernel_args, ctx.block_sizes)
         ctx.load_infos = load_infos
         ctx.fx_names = other_names
     else:
@@ -385,18 +364,9 @@ def _emit_reduction_loops(ctx: LoweringContext) -> None:
     outer_iv_n = outer_ivs[1] if len(outer_ivs) > 1 else "%tile_n_iv"
     
     for loop in ctx.reduction_loops:
-        # Emit loop metadata comment
-        if loop.is_symbolic:
-            builder.emit_comment(
-                f"block_id={loop.block_id} {loop.name} size=SYMBOLIC extent={loop.total_extent} tiles=dynamic"
-            )
-        else:
-            builder.emit_comment(
-                f"block_id={loop.block_id} {loop.name} size={loop.tile_size} extent={loop.total_extent} tiles={loop.trip_count}"
-            )
         
-        # Set up loop IV
-        reduction_iv = f"%{loop.name}_iv"
+        # Set up loop IV using block_id pattern
+        reduction_iv = f"%iv_block{loop.block_id}"
         loop.iv_name = reduction_iv
         loop_result = builder.fresh(f"{loop.name}_acc")
         
@@ -414,12 +384,16 @@ def _emit_reduction_loops(ctx: LoweringContext) -> None:
         # Compute tile sizes for this iteration
         tile_k_size = _compute_reduction_tile_size(ctx, loop, loop_dim)
         
-        # Build IV map for loads
+        # Build IV map for loads using block_id-based pattern
+        # Map tile dimension names to the corresponding block_id-based IVs
         loop_ivs = {
             "tile_m": outer_iv_m,
             "tile_n": outer_iv_n,
             "tile_k": reduction_iv,
         }
+        # Also add block_id indexed lookups for generic access
+        for loop in ctx.outer_loops + ctx.reduction_loops:
+            loop_ivs[f"block_{loop.block_id}"] = loop.iv_name
         
         # Emit all loads dynamically
         emitted_loads: list[str] = []
@@ -503,18 +477,12 @@ def _compute_reduction_trip_bound(
 def _compute_reduction_tile_size(
     ctx: LoweringContext, loop: LoopInfo, loop_dim: str | int | None
 ) -> str:
-    """Compute the tile size for the current reduction iteration."""
-    builder = ctx.builder
+    """Get the tile size for the reduction loop.
     
-    if loop_dim is not None and loop.tile_const is not None:
-        if loop.is_symbolic:
-            return _emit_dynamic_tile_size_symbolic(
-                builder, loop.iv_name, loop_dim, loop.tile_const, loop.name
-            )
-        else:
-            return _emit_dynamic_tile_size(
-                builder, loop.iv_name, loop_dim, loop.tile_size, loop.name
-            )
+    Note: We use the direct tile size without affine.min boundary checking.
+    This assumes symbolic shapes where the tile size is always the full block size.
+    """
+    # Simply return the tile size constant or SSA value
     return loop.tile_const or str(loop.tile_size)
 
 
@@ -532,7 +500,8 @@ def _emit_load(
     Args:
         ctx: Lowering context
         load_info: Information about this load extracted from FX graph
-        loop_ivs: Map from loop name to IV SSA value (e.g., {"tile_m": "%tile_m_iv"})
+        loop_ivs: Map from loop/block name to IV SSA value. Supports both legacy
+                  names (e.g., "tile_m") and block_id pattern (e.g., "block_0")
         reduction_tile_size: SSA value for the reduction tile size (tile_k)
     
     Returns:
@@ -546,26 +515,54 @@ def _emit_load(
     tensor_ssa = tensor_arg.ssa_name if tensor_arg else f"%{load_info.source_tensor_name}"
     tensor_type = tensor_arg.mlir_type if tensor_arg else ctx.tensor_type
     
-    # Determine tile dimensions based on source tensor
-    # For matmul pattern: LHS is [M, K], RHS is [K, N]
-    tile_dims = _infer_tile_dims_for_load(ctx, load_info, tensor_arg)
+    # Get tile dimensions and block IDs from LoadInfo
+    # Prefer resolved block_ids when available
+    tile_block_ids = load_info.tile_block_ids
+    tile_dim_names = load_info.tile_dim_names
     
-    # Get tile sizes for each dimension
+    # If we don't have block_ids, fall back to inferring from tensor position
+    if not tile_block_ids:
+        tile_dims = _infer_tile_dims_for_load(ctx, load_info, tensor_arg)
+        tile_dim_names = tile_dims
+        tile_block_ids = [None] * len(tile_dims)
+    
+    # Build tile sizes and indices using block_id-based IVs when available
     tile_sizes: list[str] = []
     indices: list[str] = []
-    for dim_name in tile_dims:
-        if dim_name == "tile_k":
+    
+    for i, (dim_name, block_id) in enumerate(zip(tile_dim_names, tile_block_ids)):
+        # Determine the IV to use
+        if block_id is not None:
+            # Use block_id-based IV lookup (authoritative)
+            iv = loop_ivs.get(f"block_{block_id}", f"%iv_block{block_id}")
+        else:
+            # Fall back to legacy name-based lookup
+            iv = loop_ivs.get(dim_name, f"%{dim_name}_iv")
+        indices.append(iv)
+        
+        # Determine tile size
+        if block_id is not None:
+            # Get tile size from block_sizes via block_id
+            loop_info = None
+            for loop in ctx.outer_loops + ctx.reduction_loops:
+                if loop.block_id == block_id:
+                    loop_info = loop
+                    break
+            if loop_info and loop_info.tile_const:
+                tile_sizes.append(loop_info.tile_const)
+            else:
+                tile_size = _choose_tile_size(builder, ctx.outer_tile_sizes, loop_map, dim_name)
+                tile_sizes.append(tile_size)
+        elif dim_name == "tile_k":
             tile_sizes.append(reduction_tile_size)
-            indices.append(loop_ivs.get("tile_k", "%tile_k_iv"))
         else:
             tile_size = _choose_tile_size(builder, ctx.outer_tile_sizes, loop_map, dim_name)
             tile_sizes.append(tile_size)
-            indices.append(loop_ivs.get(dim_name, f"%{dim_name}_iv"))
     
     # Ensure we have exactly 2 dimensions for 2D tensors
     while len(tile_sizes) < 2:
         tile_sizes.append(reduction_tile_size)
-        indices.append(loop_ivs.get("tile_k", "%tile_k_iv"))
+        indices.append(loop_ivs.get("tile_k", "%iv_block2"))
     
     # Create fresh SSA name for the load result
     load_result = builder.fresh(load_info.source_tensor_name)
@@ -711,52 +708,6 @@ def _emit_store_tile(ctx: LoweringContext) -> None:
 # -----------------------------------------------------------------------------
 
 
-def _emit_dynamic_tile_size(
-    builder: MLIRBuilder,
-    iv: str,
-    dim: str | int,
-    tile_size: int,
-    hint: str,
-) -> str:
-    """Emit a dynamic tile size computation for concrete tile sizes.
-    
-    If dim is an integer, it is inlined directly into the affine expression.
-    If dim is a string SSA value, it is passed as a symbol.
-    """
-    if isinstance(dim, int):
-        # Inline the integer dimension directly
-        return builder.emit_affine_min(
-            f"(d0) -> ({tile_size}, {dim} - d0 * {tile_size})",
-            [iv],
-            [],  # No symbols needed when dim is inlined
-        )
-    else:
-        return builder.emit_affine_min(
-            f"(d0)[s0] -> ({tile_size}, s0 - d0 * {tile_size})",
-            [iv],
-            [dim],
-        )
-
-
-def _emit_dynamic_tile_size_symbolic(
-    builder: MLIRBuilder,
-    iv: str,
-    dim: str | int,
-    tile_size_ssa: str,
-    hint: str,
-) -> str:
-    """Emit a dynamic tile size computation for symbolic tile sizes."""
-    if isinstance(dim, int):
-        return builder.emit_affine_min(
-            f"(d0)[s0] -> (s0, {dim} - d0 * s0)",
-            [iv],
-            [tile_size_ssa],
-        )
-    return builder.emit_affine_min(
-        "(d0)[s0, s1] -> (s1, s0 - d0 * s1)",
-        [iv],
-        [dim, tile_size_ssa],
-    )
 
 
 def _choose_tile_size(
@@ -806,8 +757,14 @@ def _first_root_graph(device_ir: "DeviceIR") -> "GraphInfo | None":
 def _extract_load_infos(
     graph_info: "GraphInfo | None",
     kernel_args: list[KernelArgInfo],
+    block_sizes: dict[int, Any],
 ) -> tuple[list[LoadInfo], dict[str, str]]:
     """Extract load operation information and other FX names from a graph.
+    
+    Args:
+        graph_info: The FX graph to extract from
+        kernel_args: Kernel argument information
+        block_sizes: Mapping from block_id to BlockSizeInfo (from env.block_sizes)
     
     Returns:
         A tuple of (list of LoadInfo, dict of other FX names like addmm).
@@ -824,6 +781,14 @@ def _extract_load_infos(
         if arg.is_tensor:
             tensor_name_to_idx[arg.name] = arg.index
     
+    # Build a map from sympy symbol to block_id using BlockSizeInfo
+    # This is the authoritative mapping from CompileEnvironment
+    import sympy
+    symbol_to_block_id: dict[sympy.Symbol, int] = {}
+    for block_id, info in block_sizes.items():
+        symbol = info.symbol()
+        symbol_to_block_id[symbol] = block_id
+    
     for node in graph_info.graph.nodes:
         if node.op == "call_function":
             if node.target is hl_memory_ops.load:
@@ -834,14 +799,18 @@ def _extract_load_infos(
                 # Match to kernel argument
                 arg_idx = tensor_name_to_idx.get(source_name)
                 
-                # Extract tile dimension names from args[1] if present
-                tile_dim_names = _parse_tile_indices(node.args[1] if len(node.args) > 1 else None)
+                # Extract tile dimension names and block IDs from args[1] if present
+                tile_dim_names, tile_block_ids = _parse_tile_indices_with_block_ids(
+                    node.args[1] if len(node.args) > 1 else None,
+                    symbol_to_block_id,
+                )
                 
                 load_infos.append(LoadInfo(
                     fx_node_name=node.name,
                     source_tensor_name=source_name,
                     source_tensor_arg_idx=arg_idx,
                     tile_dim_names=tile_dim_names,
+                    tile_block_ids=tile_block_ids,
                 ))
             elif node.target is aten.addmm.default:
                 other_names["addmm"] = node.name
@@ -849,43 +818,71 @@ def _extract_load_infos(
     return load_infos, other_names
 
 
-def _parse_tile_indices(indices_arg: object) -> list[str]:
-    """Parse tile index expression to extract dimension names.
+def _parse_tile_indices_with_block_ids(
+    indices_arg: object,
+    symbol_to_block_id: dict,
+) -> tuple[list[str], list[int | None]]:
+    """Parse tile index expression to extract dimension names AND block IDs.
     
-    The indices_arg is typically a string like "[sym_size_int, block_size_2]"
-    or a list of FX nodes representing tile dimensions.
+    Uses the authoritative symbol_to_block_id mapping from CompileEnvironment's
+    BlockSizeInfo to resolve FX node symbols to block IDs.
     
-    Returns list of dimension names like ["tile_m", "tile_k"].
+    Args:
+        indices_arg: The FX node args representing tile indices
+        symbol_to_block_id: Mapping from sympy.Symbol to block_id
+    
+    Returns:
+        Tuple of (list of dimension names, list of block IDs)
     """
     import torch.fx
-    import re
+    import torch
     
     if indices_arg is None:
-        return []
+        return [], []
     
-    # If it's a list of FX nodes, extract their names
+    dim_names: list[str] = []
+    block_ids: list[int | None] = []
+    
+    # If it's a list of FX nodes, extract their names and resolve block IDs
     if isinstance(indices_arg, (list, tuple)):
-        names = []
         for item in indices_arg:
             if isinstance(item, torch.fx.Node):
-                # Convert node name to tile dimension name
-                name = _symnode_to_tile_dim(item.name)
-                names.append(name)
+                # Get the legacy dimension name from node name
+                dim_name = _symnode_to_tile_dim(item.name)
+                dim_names.append(dim_name)
+                
+                # Try to resolve block_id from the node's meta value
+                block_id = None
+                if hasattr(item, 'meta') and 'val' in item.meta:
+                    val = item.meta['val']
+                    if hasattr(val, '_sympy_'):
+                        sympy_val = val._sympy_()
+                        block_id = symbol_to_block_id.get(sympy_val)
+                block_ids.append(block_id)
             elif hasattr(item, 'name'):
-                names.append(_symnode_to_tile_dim(item.name))
-        return names
+                dim_names.append(_symnode_to_tile_dim(item.name))
+                block_ids.append(None)
+        return dim_names, block_ids
     
-    # If it's a string, try to parse it
+    # Fallback for string format (legacy)
     if isinstance(indices_arg, str):
-        # Extract names from "[name1, name2]" format
-        # Or "TileIndex([name1, name2])" format
+        import re
         match = re.search(r'\[([^\]]+)\]', indices_arg)
         if match:
             inner = match.group(1)
             parts = [p.strip() for p in inner.split(',')]
-            return [_symnode_to_tile_dim(p) for p in parts if p]
+            for p in parts:
+                if p:
+                    dim_names.append(_symnode_to_tile_dim(p))
+                    block_ids.append(None)  # Can't resolve from string
     
-    return []
+    return dim_names, block_ids
+
+
+def _parse_tile_indices(indices_arg: object) -> list[str]:
+    """Legacy: Parse tile index expression to extract dimension names only."""
+    dim_names, _ = _parse_tile_indices_with_block_ids(indices_arg, {})
+    return dim_names
 
 
 def _symnode_to_tile_dim(name: str) -> str:
@@ -893,6 +890,9 @@ def _symnode_to_tile_dim(name: str) -> str:
     
     E.g., "sym_size_int" -> "tile_m", "block_size_2" -> "tile_k"
     Or preserve known names like "tile_m", "tile_n", "tile_k".
+    
+    Note: This is a fallback heuristic. Prefer using block_id resolution
+    from CompileEnvironment when available.
     """
     # Already a tile name
     if name.startswith("tile_"):

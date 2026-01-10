@@ -65,7 +65,8 @@ class LoadInfo:
     fx_node_name: str  # FX node name (e.g., "load", "load_1")
     source_tensor_name: str  # Source tensor name from FX graph (e.g., "x", "y")
     source_tensor_arg_idx: int | None = None  # Index in kernel args, if matched
-    tile_dim_names: list[str] = field(default_factory=list)  # Dimension names for tile (e.g., ["tile_m", "tile_k"])
+    tile_dim_names: list[str] = field(default_factory=list)  # Legacy: Dimension names for tile
+    tile_block_ids: list[int | None] = field(default_factory=list)  # Block IDs for each tile dimension
     ssa_name: str | None = None  # Assigned MLIR SSA name after emission
 
 

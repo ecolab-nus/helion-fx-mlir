@@ -167,6 +167,24 @@ The MLIR emitter extracts the source tensor name to:
 
 Each operation retains the originating FX node name (`fx_node = "load"`, `"store"`, …) so downstream passes can reconcile the MLIR with the original Helion FX graph.
 
+## Limitations
+
+> [!IMPORTANT]
+> The following limitations apply to the current MLIR generation:
+
+### Tensor Indexing
+- **Only simple indexing syntax is supported**: `x[tile_m, tile_k]` where `tile_m` and `tile_k` are defined by `hl.tile()`.
+- **Not supported**: Complex indexing with `tile.start()`, `tile.index()`, or slice expressions. Support for these will be added in future versions.
+
+### Shape Handling
+- **Only symbolic shapes are supported**. We do not handle truly dynamic shapes at runtime.
+- **No tile boundary checking**: The generated MLIR does not use `affine.min` for tile boundary handling. All tiles use the full block size.
+- Symbolic shape parameters (M, N, K) and block sizes appear as module attributes.
+
+### Loop Structure
+- Loop induction variables use block_id-based naming: `%iv_block0`, `%iv_block1`, etc.
+- Block IDs correspond to `hl.tile()` calls in order of appearance.
+
 ## Status & Next Steps
 
 - ✔️ **Loop topology**: reconstructed from Helion's `DeviceIR` (supports multiple roots / nested `_for_loop` blocks).
