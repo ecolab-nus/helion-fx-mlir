@@ -460,27 +460,39 @@ class IRVisitor:
         return ssa
     
     def visit_sym_size(self, node: fx.Node) -> str:
-        """Inline concrete tensor dimension value."""
+        """Handle aten.sym_size.int - maps to outer loop tile index.
+        
+        In ForLoopGraphInfo, sym_size_int is used to get the tile index
+        from the outer loops. For example:
+        - sym_size_int(arg0_1, 0) -> %iv_block0 (first outer loop IV)
+        - sym_size_int(arg0_1, 1) -> %iv_block1 (second outer loop IV)
+        """
         tensor_node = node.args[0]
         dim = node.args[1]
         
-        tensor_name = tensor_node.name if isinstance(tensor_node, fx.Node) else str(tensor_node)
+        # Map dimension to outer loop IV
+        # dim 0 -> block 0 -> %iv_block0
+        # dim 1 -> block 1 -> %iv_block1
+        if dim < len(self.ctx.outer_loops):
+            block_id = self.ctx.outer_loops[dim].block_id
+            iv_name = f"%iv_block{block_id}"
+            self.node_values[node.name] = iv_name
+            return iv_name
         
-        # Look up in kernel_args for concrete shape
-        for arg in self.ctx.kernel_args:
-            if arg.name == tensor_name and arg.shape:
-                if dim < len(arg.shape):
-                    concrete_value = arg.shape[dim]
-                    if isinstance(concrete_value, int):
-                        # Return inline constant (store as string for affine expressions)
-                        self.node_values[node.name] = str(concrete_value)
-                        return str(concrete_value)
+        # Fallback for reduction dimension or other cases
+        # Look up if this corresponds to a reduction loop
+        if dim < len(self.ctx.outer_loops) + len(self.ctx.reduction_loops):
+            idx = dim - len(self.ctx.outer_loops)
+            if idx < len(self.ctx.reduction_loops):
+                block_id = self.ctx.reduction_loops[idx].block_id
+                iv_name = f"%iv_block{block_id}"
+                self.node_values[node.name] = iv_name
+                return iv_name
         
-        # Fallback: emit as symbol lookup
-        ssa = self.builder.fresh(f"dim_{dim}")
-        self.builder.emit(f'{ssa} = arith.constant {dim} : index')
-        self.node_values[node.name] = ssa
-        return ssa
+        # Last fallback: just use the dim as block id
+        iv_name = f"%iv_block{dim}"
+        self.node_values[node.name] = iv_name
+        return iv_name
     
     def visit_load(self, node: fx.Node) -> str:
         """Generate helion.load with affine expressions."""
