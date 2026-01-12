@@ -15,11 +15,11 @@ using namespace helion;
 void HelionDialect::initialize() {
   addOperations<
       AllocLikeOp,
-      AnnotateTensorOp,
       CallTorchOp,
-      LoadTileDynamicOp,
+      GetModuleAttributeOp,
+      LoadOp,
       PhiOp,
-      StoreTileDynamicOp,
+      StoreOp,
       ZeroTileOp
       >();
 }

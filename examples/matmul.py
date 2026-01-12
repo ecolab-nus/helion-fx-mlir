@@ -159,12 +159,14 @@ def main() -> None:
     print(mlir_text)
 
     result = validate_with_helion_opt(
-        mlir_text, opt_path="/mnt/fast/llvm-mlir/bin/mlir-opt"
+        mlir_text,
+        opt_path="build/mlir/helion-opt",
+        extra_args=["--allow-unregistered-dialect"],
     )
     if result.returncode != 0:
         print(result.stderr, file=sys.stderr)
-        raise SystemExit("mlir-opt validation failed (see stderr above).")
-    print("mlir-opt validation succeeded.\n")
+        raise SystemExit("helion-opt validation failed (see stderr above).")
+    print("helion-opt validation succeeded.\n")
 
     # autotune(1024, 1024, 1024)
     # check(1024, 1024, 1024)

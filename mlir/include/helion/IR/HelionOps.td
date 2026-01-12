@@ -28,8 +28,7 @@ class Helion_Op<string mnemonic, list<Trait> traits = []> :
 // helion.alloc_like
 //===----------------------------------------------------------------------===//
 
-def Helion_AllocLikeOp : Helion_Op<"alloc_like",
-    [SameOperandsAndResultType]> {
+def Helion_AllocLikeOp : Helion_Op<"alloc_like"> {
   let summary = "allocate a tensor like the source operand";
   let description = [{
     The `helion.alloc_like` op materialises a tensor SSA value matching the
@@ -61,10 +60,10 @@ def Helion_ZeroTileOp : Helion_Op<"zero_tile"> {
 
 
 //===----------------------------------------------------------------------===//
-// helion.load_tile_dynamic
+// helion.load
 //===----------------------------------------------------------------------===//
 
-def Helion_LoadTileDynamicOp : Helion_Op<"load_tile_dynamic"> {
+def Helion_LoadOp : Helion_Op<"load"> {
   let summary = "load a dynamically sized tensor tile";
   let description = [{
     Loads a tile slice from the source tensor, parameterised by dynamic tile
@@ -84,7 +83,7 @@ def Helion_LoadTileDynamicOp : Helion_Op<"load_tile_dynamic"> {
 // helion.call_torch
 //===----------------------------------------------------------------------===//
 
-def Helion_CallTorchOp : Helion_Op<"call_torch", [SameOperandsAndResultType]> {
+def Helion_CallTorchOp : Helion_Op<"call_torch"> {
   let summary = "delegate computation to a Torch operator";
   let description = [{
     Proxies Helion math to an underlying Torch operator until the lowering is
@@ -102,8 +101,7 @@ def Helion_CallTorchOp : Helion_Op<"call_torch", [SameOperandsAndResultType]> {
 // helion.phi
 //===----------------------------------------------------------------------===//
 
-def Helion_PhiOp : Helion_Op<"phi",
-    [SameOperandsAndResultType]> {
+def Helion_PhiOp : Helion_Op<"phi"> {
   let summary = "Helion loop-carried value placeholder";
   let description = [{
     Models a phi node that threads the carried tensor across loop iterations.
@@ -115,10 +113,10 @@ def Helion_PhiOp : Helion_Op<"phi",
 }
 
 //===----------------------------------------------------------------------===//
-// helion.store_tile_dynamic
+// helion.store
 //===----------------------------------------------------------------------===//
 
-def Helion_StoreTileDynamicOp : Helion_Op<"store_tile_dynamic"> {
+def Helion_StoreOp : Helion_Op<"store"> {
   let summary = "store a dynamically sized tensor tile";
   let description = [{
     Stores the tile back into the destination tensor, threading the dynamic
@@ -139,7 +137,7 @@ def Helion_StoreTileDynamicOp : Helion_Op<"store_tile_dynamic"> {
 // helion.get_module_attribute
 //===----------------------------------------------------------------------===//
 
-def Helion_GetModuleAttributeOp : Helion_Op<"get_module_attribute", [Pure]> {
+def Helion_GetModuleAttributeOp : Helion_Op<"get_module_attribute"> {
   let summary = "get a module attribute value";
   let description = [{
     The `helion.get_module_attribute` op retrieves a named attribute from the

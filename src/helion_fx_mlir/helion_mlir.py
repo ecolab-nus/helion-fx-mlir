@@ -579,7 +579,7 @@ def _emit_load(
     })
     
     builder.emit(
-        f'{load_result} = "helion.load_tile_dynamic"({tensor_ssa}, {tile_sizes[0]}, {tile_sizes[1]}){attrs} '
+        f'{load_result} = "helion.load"({tensor_ssa}, {tile_sizes[0]}, {tile_sizes[1]}){attrs} '
         f": ({tensor_type}, index, index) -> {ctx.tensor_type}"
     )
     
@@ -698,7 +698,7 @@ def _emit_store_tile(ctx: LoweringContext) -> None:
     output_type = format_tensor_type([ctx.m_extent, ctx.n_extent], ctx.element_type)
     
     builder.emit(
-        f'"helion.store_tile_dynamic"({ctx.out_value}, {ctx.current_acc}, {store_tile_m_size}, {store_tile_n_size}){store_attrs} '
+        f'"helion.store"({ctx.out_value}, {ctx.current_acc}, {store_tile_m_size}, {store_tile_n_size}){store_attrs} '
         f": ({output_type}, {ctx.tensor_type}, index, index) -> ()"
     )
 
