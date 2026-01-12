@@ -139,6 +139,9 @@ class LoweringContext:
     # Load operations extracted from FX graph
     load_infos: list[LoadInfo] = field(default_factory=list)
     
+    # Output tensor shape (inferred from outer loops or store target)
+    output_shape: list[int | None] = field(default_factory=list)
+    
     # Concrete dimension extents by loop name (generalized from m/n/k)
     # Backward compat properties derive from this
     
@@ -281,6 +284,13 @@ class LoweringContext:
         if index < len(tensor_args):
             return tensor_args[index].ssa_name or f"%arg{index}"
         return f"%arg{index}"
+    
+    def get_tensor_arg_type(self, index: int) -> str:
+        """Get MLIR type of tensor argument at given index."""
+        tensor_args = self.get_tensor_args()
+        if index < len(tensor_args):
+            return tensor_args[index].mlir_type or self.tensor_type
+        return self.tensor_type
     
     def _build_loop_info(self, lhs: "Tensor", rhs: "Tensor") -> None:
         """Build loop information from block sizes and parallel block IDs."""

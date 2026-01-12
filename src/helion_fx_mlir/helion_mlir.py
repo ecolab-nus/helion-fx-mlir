@@ -87,12 +87,9 @@ def generate_plan_stage0_mlir(
     ctx = LoweringContext.from_bound_kernel(bound_kernel, kernel_name)
     builder = ctx.builder
     
-    # Get tensor arguments
-    fake_args = bound_kernel.fake_args
-    lhs, rhs, *_ = fake_args
-    
-    # Compute full output shape
-    full_shape = [as_optional_int(lhs.size(0)), as_optional_int(rhs.size(1))]
+    # Infer output shape from outer loop extents (generalized from matmul [M, N])
+    # The outer loops define the output dimensions
+    full_shape = _infer_output_shape(ctx)
     full_shape_attr = format_shape_attr(full_shape)
     
     # Emit module start with tile size attributes
@@ -103,43 +100,42 @@ def generate_plan_stage0_mlir(
     func_args = ctx.get_func_signature_args()
     symbolic_tile_args = ctx.get_symbolic_tile_args()
     
-    # Determine result type with concrete output shape [M, N]
-    result_type = format_tensor_type([ctx.m_extent, ctx.n_extent], ctx.element_type)
+    # Determine result type from inferred output shape
+    result_type = format_tensor_type(full_shape, ctx.element_type)
     
     # Emit function start
     builder.emit_func_start(kernel_name, func_args, result_type)
     
     # Emit get_module_attribute ops for each symbolic tile size
-    # Map loop names to dimension letters for block_* naming
-    def loop_name_to_dim(name: str) -> str:
-        if name in {"tile_m", "m"}:
-            return "m"
-        elif name in {"tile_n", "n"}:
-            return "n"
-        elif name in {"tile_k", "k"}:
-            return "k"
-        elif name in {"tile_b", "b"}:
-            return "b"
-        return name.lower()
-    
+    # Use block_id-based naming for consistency
     for sym_arg in symbolic_tile_args:
         loop_name = sym_arg["name"]
-        dim_letter = loop_name_to_dim(loop_name)
-        attr_name = f"loom.block_{dim_letter}"
-        ssa = builder.emit_get_module_attribute(attr_name, f"block_{dim_letter}")
+        block_id = sym_arg.get("block_id")
+        # Use block_id if available, otherwise fall back to loop name
+        if block_id is not None:
+            attr_name = f"loom.block_{block_id}"
+            ssa_hint = f"block_{block_id}"
+        else:
+            # Fallback to legacy naming for compatibility
+            dim_letter = _loop_name_to_dim_letter(loop_name)
+            attr_name = f"loom.block_{dim_letter}"
+            ssa_hint = f"block_{dim_letter}"
+        ssa = builder.emit_get_module_attribute(attr_name, ssa_hint)
         ctx.symbolic_arg_ssa[loop_name] = ssa
     
     # Emit output allocation (using first tensor arg as template)
-    lhs_ssa = ctx.get_lhs_tensor_ssa()
-    lhs_type = ctx.get_lhs_tensor_type()
+    first_tensor = ctx.get_tensor_arg_ssa(0)
+    first_tensor_type = ctx.get_tensor_arg_type(0)
     
     ctx.out_value = builder.fresh("out")
-    # Output tensor has shape [M, N] 
-    output_type = format_tensor_type([ctx.m_extent, ctx.n_extent], ctx.element_type)
+    output_type = format_tensor_type(full_shape, ctx.element_type)
     alloc_attrs = format_attr_dict({"shape": full_shape_attr})
     builder.emit(
-        f'{ctx.out_value} = "helion.alloc_like"({lhs_ssa}){alloc_attrs} : ({lhs_type}) -> {output_type}'
+        f'{ctx.out_value} = "helion.alloc_like"({first_tensor}){alloc_attrs} : ({first_tensor_type}) -> {output_type}'
     )
+    
+    # Store output shape for later use
+    ctx.output_shape = full_shape
     
     # Emit accumulator initialization
     ctx.acc_seed = builder.fresh("acc_init")
@@ -161,8 +157,8 @@ def generate_plan_stage0_mlir(
     # Emit outer parallel loop
     _emit_parallel_loop_structure(ctx, bound_kernel)
     
-    # Emit function end and return (output has shape [M, N])
-    output_type = format_tensor_type([ctx.m_extent, ctx.n_extent], ctx.element_type)
+    # Emit function end and return
+    output_type = format_tensor_type(ctx.output_shape, ctx.element_type)
     builder.emit(f"return {ctx.out_value} : {output_type}")
     builder.emit_func_end()
     builder.emit_module_end()
@@ -170,56 +166,67 @@ def generate_plan_stage0_mlir(
     return builder.build()
 
 
-def _emit_dimension_queries(ctx: LoweringContext) -> None:
-    """Emit dimension values as arith.constant or store as int if known."""
-    builder = ctx.builder
+def _infer_output_shape(ctx: LoweringContext) -> list[int | None]:
+    """Infer output shape from outer loop extents.
     
-    # Get concrete dimension values from loop info
-    # The total_extent in each loop IS the dimension size
+    The outer (parallel) loops define the output tensor dimensions.
+    For matmul: [tile_m, tile_n] -> [M, N]
+    For attention: [tile_b, tile_m] + head_dim
+    
+    This generalizes the previous hardcoded [lhs.size(0), rhs.size(1)] pattern.
+    """
+    shape = []
+    for loop in ctx.outer_loops:
+        extent = loop.total_extent
+        if isinstance(extent, int):
+            shape.append(extent)
+        else:
+            shape.append(None)  # Dynamic dimension
+    
+    # Ensure we have at least 2 dimensions for typical 2D output tensors
+    while len(shape) < 2:
+        shape.append(None)
+    
+    return shape
+
+
+def _loop_name_to_dim_letter(name: str) -> str:
+    """Map loop name to dimension letter for legacy compatibility.
+    
+    This is used as a fallback when block_id is not available.
+    Prefer using block_id directly when possible.
+    """
+    if name in {"tile_m", "m"}:
+        return "m"
+    elif name in {"tile_n", "n"}:
+        return "n"
+    elif name in {"tile_k", "k"}:
+        return "k"
+    elif name in {"tile_b", "b"}:
+        return "b"
+    # Extract trailing letter or number from name
+    if name.startswith("tile_"):
+        return name[5:].lower()
+    return name.lower()
+
+
+def _emit_dimension_queries(ctx: LoweringContext) -> None:
+    """Store dimension values from loop extents.
+    
+    This generalizes the previous hardcoded dim_m/dim_k/dim_n extraction
+    to work with any loop names by populating loop_extents dict.
+    """
+    # The loop extents are already populated in LoweringContext._build_loop_info_generic()
+    # Just ensure backward compatibility by setting legacy attributes if the loops exist
     loop_map = ctx.get_loop_map()
     
-    # Get M dimension from tile_m loop
-    tile_m_loop = loop_map.get("tile_m")
-    if tile_m_loop:
-        # If extent is concrete (int), store it directly. Otherwise emit constant.
-        # But wait, BoundKernel extents are usually integers even for dynamic shapes 
-        # unless they are SymInts.
-        # The goal is: if we KNOW it's a fixed integer at compile time (from BoundKernel),
-        # we can just use that integer in affine maps.
-        
-        # However, for true dynamic shapes support in the future, we might want to read from
-        # the tensor dims. But for now, we follow the user request to inline the values
-        # found in the BoundKernel (which are concrete for the bound arguments).
-        
-        if isinstance(tile_m_loop.total_extent, int):
-            ctx.dim_m = tile_m_loop.total_extent
+    # Legacy compatibility: set dim_m, dim_k, dim_n if corresponding loops exist
+    for loop_name, legacy_attr in [("tile_m", "dim_m"), ("tile_k", "dim_k"), ("tile_n", "dim_n")]:
+        loop = loop_map.get(loop_name)
+        if loop:
+            setattr(ctx, legacy_attr, int(loop.total_extent))
         else:
-            # Fallback for symbolic (though current BoundKernel usually resolves to int or SymInt)
-            # If it's SymInt, we probably still want to use it as a symbol or inline it 
-            # if the MLIR builder supports it. 
-            # For now, let's treat non-ints as requiring SSA values (which we don't have for dims easily yet
-            # without reading from tensor).
-            # But wait, previous code did `builder.emit_index_constant(tile_m_loop.total_extent)`.
-            # If total_extent is a SymInt, emit_index_constant might fail or produce a constant op?
-            # Actually, `emit_index_constant` expects an int.
-            # So `total_extent` must be int compatible here.
-            ctx.dim_m = int(tile_m_loop.total_extent)
-    else:
-        ctx.dim_m = 0
-    
-    # Get K dimension from tile_k loop
-    tile_k_loop = loop_map.get("tile_k")
-    if tile_k_loop:
-        ctx.dim_k = int(tile_k_loop.total_extent)
-    else:
-        ctx.dim_k = 0
-    
-    # Get N dimension from tile_n loop
-    tile_n_loop = loop_map.get("tile_n")
-    if tile_n_loop:
-        ctx.dim_n = int(tile_n_loop.total_extent)
-    else:
-        ctx.dim_n = 0
+            setattr(ctx, legacy_attr, 0)
 
 
 def _emit_loop_bounds(ctx: LoweringContext) -> None:
@@ -360,8 +367,6 @@ def _emit_reduction_loops(ctx: LoweringContext) -> None:
     loop_map = ctx.get_loop_map()
     
     outer_ivs = [loop.iv_name for loop in ctx.outer_loops]
-    outer_iv_m = outer_ivs[0] if outer_ivs else "%tile_m_iv"
-    outer_iv_n = outer_ivs[1] if len(outer_ivs) > 1 else "%tile_n_iv"
     
     for loop in ctx.reduction_loops:
         
@@ -382,35 +387,38 @@ def _emit_reduction_loops(ctx: LoweringContext) -> None:
         builder.push()
         
         # Compute tile sizes for this iteration
-        tile_k_size = _compute_reduction_tile_size(ctx, loop, loop_dim)
+        reduction_tile_size = _compute_reduction_tile_size(ctx, loop, loop_dim)
         
-        # Build IV map for loads using block_id-based pattern
-        # Map tile dimension names to the corresponding block_id-based IVs
-        loop_ivs = {
-            "tile_m": outer_iv_m,
-            "tile_n": outer_iv_n,
-            "tile_k": reduction_iv,
-        }
-        # Also add block_id indexed lookups for generic access
-        for loop in ctx.outer_loops + ctx.reduction_loops:
-            loop_ivs[f"block_{loop.block_id}"] = loop.iv_name
+        # Build IV map for loads using block_id-based pattern (generalized)
+        # Map loop names AND block_ids to corresponding IVs
+        loop_ivs = {}
+        
+        # Add all outer loop IVs by name and block_id
+        for i, outer_loop in enumerate(ctx.outer_loops):
+            loop_ivs[outer_loop.name] = outer_loop.iv_name
+            loop_ivs[f"block_{outer_loop.block_id}"] = outer_loop.iv_name
+            # Legacy compatibility: map first two outer loops to tile_m/tile_n
+            if i == 0:
+                loop_ivs["tile_m"] = outer_loop.iv_name
+            elif i == 1:
+                loop_ivs["tile_n"] = outer_loop.iv_name
+        
+        # Add all reduction loop IVs by name and block_id
+        for red_loop in ctx.reduction_loops:
+            loop_ivs[red_loop.name] = red_loop.iv_name
+            loop_ivs[f"block_{red_loop.block_id}"] = red_loop.iv_name
+            # Legacy compatibility
+            loop_ivs["tile_k"] = red_loop.iv_name
         
         # Emit all loads dynamically
         emitted_loads: list[str] = []
         for load_info in ctx.load_infos:
-            load_ssa = _emit_load(ctx, load_info, loop_ivs, tile_k_size)
+            load_ssa = _emit_load(ctx, load_info, loop_ivs, reduction_tile_size)
             emitted_loads.append(load_ssa)
             load_info.ssa_name = load_ssa
         
-        # Emit computation (addmm) - use first two loads for now
-        # TODO: Generalize for other computation patterns
-        if len(emitted_loads) >= 2:
-            acc_next = _emit_addmm(ctx, emitted_loads[0], emitted_loads[1])
-        elif len(emitted_loads) == 1:
-            # Single load case - just pass through
-            acc_next = emitted_loads[0]
-        else:
-            acc_next = "%acc_iter"
+        # Emit computation using registry-based dispatch or fallback to call_torch
+        acc_next = _emit_computation(ctx, emitted_loads)
         
         # Emit yield
         builder.emit(f"affine.yield {acc_next} : {ctx.tensor_type}")
@@ -607,35 +615,90 @@ def _infer_tile_dims_for_load(
 ) -> list[str]:
     """Infer the tile dimension names for a load operation.
     
-    This determines which loop dimensions correspond to which tensor dimensions.
-    For matmul: LHS[M,K] -> [tile_m, tile_k], RHS[K,N] -> [tile_k, tile_n]
+    Generalized to use:
+    1. Explicit tile_dim_names from LoadInfo (parsed from FX graph) - preferred
+    2. Block ID based inference from outer/reduction loops
+    3. Fallback to first outer loops as default
+    
+    Previous matmul-specific logic (LHS[M,K], RHS[K,N]) is kept as legacy fallback.
     """
-    # If the LoadInfo already has explicit tile_dim_names, use them
+    # If the LoadInfo already has explicit tile_dim_names from FX, use them
     if load_info.tile_dim_names:
         return load_info.tile_dim_names
     
-    # Infer based on tensor position in kernel args
-    # For typical matmul: first tensor is LHS [M,K], second is RHS [K,N]
-    tensor_args = ctx.get_tensor_args()
+    # If we have block_ids from LoadInfo, convert them to loop names
+    if load_info.tile_block_ids:
+        dim_names = []
+        all_loops = ctx.outer_loops + ctx.reduction_loops
+        block_to_loop = {loop.block_id: loop for loop in all_loops}
+        
+        for block_id in load_info.tile_block_ids:
+            if block_id is not None and block_id in block_to_loop:
+                dim_names.append(block_to_loop[block_id].name)
+            else:
+                # Fallback for unknown block_id
+                dim_names.append(f"block_{block_id}" if block_id is not None else "tile_m")
+        
+        if dim_names:
+            return dim_names
     
-    if tensor_arg is None:
-        # Fallback to order-based inference
-        return ["tile_m", "tile_k"]
+    # Fallback: use outer loops + reduction loops in order
+    # This covers generic cases where we don't have explicit mappings
+    all_loop_names = [loop.name for loop in ctx.outer_loops + ctx.reduction_loops]
+    if len(all_loop_names) >= 2:
+        return all_loop_names[:2]
+    elif all_loop_names:
+        return all_loop_names
     
-    try:
-        idx = tensor_args.index(tensor_arg)
-    except ValueError:
-        return ["tile_m", "tile_k"]
+    # Ultimate fallback
+    return ["tile_m", "tile_k"]
+
+
+
+def _emit_computation(ctx: LoweringContext, emitted_loads: list[str]) -> str:
+    """Emit computation op based on FX graph analysis.
     
-    if idx == 0:
-        # First tensor: LHS pattern [M, K]
-        return ["tile_m", "tile_k"]
-    elif idx == 1:
-        # Second tensor: RHS pattern [K, N]
-        return ["tile_k", "tile_n"]
+    This generalizes the previous hardcoded _emit_addmm by:
+    1. Looking up the computation target from FX names
+    2. Dispatching to appropriate handler based on the op
+    3. Falling back to addmm pattern for backward compatibility
+    
+    Args:
+        ctx: Lowering context
+        emitted_loads: List of SSA names for loaded tiles
+    
+    Returns:
+        SSA name of the computation result
+    """
+    if not emitted_loads:
+        return "%acc_iter"
+    
+    if len(emitted_loads) == 1:
+        # Single load case - just pass through
+        return emitted_loads[0]
+    
+    # Check what computation op is in the FX graph
+    # fx_names contains op type -> fx_node_name mapping
+    computation_op = None
+    for op_key in ctx.fx_names:
+        if op_key in {"addmm", "mm", "bmm", "baddbmm", "matmul"}:
+            computation_op = op_key
+            break
+    
+    builder = ctx.builder
+    
+    if computation_op == "addmm" or computation_op is None:
+        # Default: use addmm pattern (accumulator + lhs @ rhs)
+        return _emit_addmm(ctx, emitted_loads[0], emitted_loads[1])
+    elif computation_op == "bmm":
+        # Batched matrix multiply
+        return _emit_bmm(ctx, emitted_loads[0], emitted_loads[1])
+    elif computation_op == "baddbmm":
+        # Batched addmm
+        return _emit_baddbmm(ctx, emitted_loads[0], emitted_loads[1])
     else:
-        # Additional tensors: default to [M, K] pattern
-        return ["tile_m", "tile_k"]
+        # Generic fallback using call_torch
+        return _emit_generic_computation(ctx, computation_op, emitted_loads)
 
 
 def _emit_addmm(ctx: LoweringContext, lhs_tile: str, rhs_tile: str) -> str:
@@ -658,6 +721,73 @@ def _emit_addmm(ctx: LoweringContext, lhs_tile: str, rhs_tile: str) -> str:
     return acc_next
 
 
+def _emit_bmm(ctx: LoweringContext, lhs_tile: str, rhs_tile: str) -> str:
+    """Emit aten.bmm via helion.call_torch."""
+    builder = ctx.builder
+    
+    acc_next = builder.fresh("acc")
+    bmm_fx_attr = ctx.fx_names.get("bmm")
+    
+    call_attrs = format_attr_dict({
+        "fn_name": format_string_attr("aten.bmm"),
+        "fx_node": format_string_attr(bmm_fx_attr) if bmm_fx_attr else None,
+    })
+    
+    builder.emit(
+        f'{acc_next} = "helion.call_torch"({lhs_tile}, {rhs_tile}){call_attrs} '
+        f": ({ctx.tensor_type}, {ctx.tensor_type}) -> {ctx.tensor_type}"
+    )
+    
+    return acc_next
+
+
+def _emit_baddbmm(ctx: LoweringContext, lhs_tile: str, rhs_tile: str) -> str:
+    """Emit aten.baddbmm via helion.call_torch."""
+    builder = ctx.builder
+    
+    acc_next = builder.fresh("acc")
+    fx_attr = ctx.fx_names.get("baddbmm")
+    
+    call_attrs = format_attr_dict({
+        "fn_name": format_string_attr("aten.baddbmm"),
+        "fx_node": format_string_attr(fx_attr) if fx_attr else None,
+    })
+    
+    builder.emit(
+        f'{acc_next} = "helion.call_torch"(%acc_iter, {lhs_tile}, {rhs_tile}){call_attrs} '
+        f": ({ctx.tensor_type}, {ctx.tensor_type}, {ctx.tensor_type}) -> {ctx.tensor_type}"
+    )
+    
+    return acc_next
+
+
+def _emit_generic_computation(
+    ctx: LoweringContext, op_name: str, operands: list[str]
+) -> str:
+    """Emit a generic computation via helion.call_torch."""
+    builder = ctx.builder
+    
+    acc_next = builder.fresh("acc")
+    fx_attr = ctx.fx_names.get(op_name)
+    
+    # Build operand list including accumulator
+    all_operands = ["%acc_iter"] + operands
+    operand_str = ", ".join(all_operands)
+    type_str = ", ".join([ctx.tensor_type] * len(all_operands))
+    
+    call_attrs = format_attr_dict({
+        "fn_name": format_string_attr(f"aten.{op_name}"),
+        "fx_node": format_string_attr(fx_attr) if fx_attr else None,
+    })
+    
+    builder.emit(
+        f'{acc_next} = "helion.call_torch"({operand_str}){call_attrs} '
+        f": ({type_str}) -> {ctx.tensor_type}"
+    )
+    
+    return acc_next
+
+
 def _emit_phi_if_present(ctx: LoweringContext) -> None:
     """Emit phi node if present in root FX info."""
     builder = ctx.builder
@@ -674,31 +804,49 @@ def _emit_phi_if_present(ctx: LoweringContext) -> None:
 
 
 def _emit_store_tile(ctx: LoweringContext) -> None:
-    """Emit store tile operation."""
+    """Emit store tile operation.
+    
+    Generalized to use outer loop indices and tile sizes instead of
+    hardcoded tile_m/tile_n assumptions.
+    """
     builder = ctx.builder
     loop_map = ctx.get_loop_map()
     
+    # Get outer loop IVs and tile sizes dynamically
     outer_ivs = [loop.iv_name for loop in ctx.outer_loops]
-    outer_iv_m = outer_ivs[0] if outer_ivs else "%tile_m_iv"
-    outer_iv_n = outer_ivs[1] if len(outer_ivs) > 1 else "%tile_n_iv"
     
-    store_tile_m_size = _choose_tile_size(builder, ctx.outer_tile_sizes, loop_map, "tile_m")
-    store_tile_n_size = _choose_tile_size(builder, ctx.outer_tile_sizes, loop_map, "tile_n")
-    store_meta = format_dynamic_tensor_meta(store_tile_m_size, store_tile_n_size, ctx.element_type)
+    # Get tile sizes for each outer loop dimension
+    store_tile_sizes = []
+    for loop in ctx.outer_loops:
+        # Try to get from outer_tile_sizes first, then from loop info
+        tile_size = ctx.outer_tile_sizes.get(loop.name)
+        if tile_size is None:
+            tile_size = _choose_tile_size(builder, ctx.outer_tile_sizes, loop_map, loop.name)
+        store_tile_sizes.append(tile_size)
+    
+    # Ensure we have at least 2 dimensions for 2D output
+    while len(outer_ivs) < 2:
+        outer_ivs.append("%unused_iv")
+    while len(store_tile_sizes) < 2:
+        # Use first tile size as fallback
+        fallback = store_tile_sizes[0] if store_tile_sizes else builder.emit_index_constant(1)
+        store_tile_sizes.append(fallback)
+    
+    store_meta = format_dynamic_tensor_meta(store_tile_sizes[0], store_tile_sizes[1], ctx.element_type)
     
     store_attrs = format_attr_dict({
-        "tile": format_indices_attr([outer_iv_m, outer_iv_n]),
+        "tile": format_indices_attr(outer_ivs[:2]),
         "sizes": ctx.tile_shape_attr,
         "tensor_meta": store_meta,
         "fx_node": format_string_attr(ctx.root_fx_info.get("store"))
             if ctx.root_fx_info.get("store") else None,
     })
     
-    # Output tensor has shape [M, N]
-    output_type = format_tensor_type([ctx.m_extent, ctx.n_extent], ctx.element_type)
+    # Use output shape from context
+    output_type = format_tensor_type(ctx.output_shape, ctx.element_type)
     
     builder.emit(
-        f'"helion.store"({ctx.out_value}, {ctx.current_acc}, {store_tile_m_size}, {store_tile_n_size}){store_attrs} '
+        f'"helion.store"({ctx.out_value}, {ctx.current_acc}, {store_tile_sizes[0]}, {store_tile_sizes[1]}){store_attrs} '
         f": ({output_type}, {ctx.tensor_type}, index, index) -> ()"
     )
 

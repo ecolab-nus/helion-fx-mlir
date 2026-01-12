@@ -185,6 +185,40 @@ Each operation retains the originating FX node name (`fx_node = "load"`, `"store
 - Loop induction variables use block_id-based naming: `%iv_block0`, `%iv_block1`, etc.
 - Block IDs correspond to `hl.tile()` calls in order of appearance.
 
+## TODO: Generalize Matmul-Specific Logic
+
+> [!NOTE]
+> Many of these items have been addressed in the generalization refactoring. The code now uses block_id-based indexing and loop-aware inference instead of hardcoded matmul patterns.
+
+### Completed Generalizations
+
+- [x] **Output shape inference**: Now uses outer loop extents instead of hardcoded `[lhs.size(0), rhs.size(1)]`
+- [x] **Loop IV mapping**: Uses block_id-based IVs (`%iv_block0`, etc.) with dynamic lookup instead of hardcoded `tile_m/n/k`
+- [x] **Tile dimension inference**: `_infer_tile_dims_for_load()` now uses `LoadInfo.tile_block_ids` from FX graph
+- [x] **Store tile emission**: `_emit_store_tile()` uses outer loop info instead of hardcoded tile_m/tile_n
+- [x] **Computation dispatch**: `_emit_computation()` dispatches to addmm/bmm/baddbmm based on FX graph analysis
+- [x] **Tensor arg access**: `get_tensor_arg_ssa/type(index)` replaces hardcoded LHS/RHS methods
+
+### Remaining Limitations (for complex kernels like attention)
+- [ ] **3D tensor support**: Current code assumes 2D tensors; 3D batched operations need explicit handling
+- [ ] **Multiple loop-carried values**: Attention has `(m_i, l_i, acc)` but code assumes single accumulator
+- [ ] **Slice indexing**: `slice(None, None, None)` in load args not yet handled
+- [ ] **Multi-output reduction loops**: `ForLoopGraphInfo` returning multiple values
+
+### Legacy Fallbacks Still Present
+
+The following use legacy naming as fallbacks but work generically:
+
+- `_loop_name_to_dim_letter()`: Maps tile_m→m etc., used for module attribute naming
+- `_symnode_to_tile_dim()`: Fallback when block_id not available from FX metadata
+- `m_extent/n_extent/k_extent` properties: Kept for backward compatibility
+
+### Future Improvements
+
+1. **Parse slice expressions**: Support `x[tile_b, tile_m, :]` syntax in load operations
+2. **Multi-value iter_args**: Handle multiple loop-carried values for flash attention
+3. **3D tensor types**: Emit `tensor<?x?x?xf32>` for batched operations
+
 ## Status & Next Steps
 
 - ✔️ **Loop topology**: reconstructed from Helion's `DeviceIR` (supports multiple roots / nested `_for_loop` blocks).
