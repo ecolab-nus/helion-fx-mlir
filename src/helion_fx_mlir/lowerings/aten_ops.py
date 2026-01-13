@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import torch
+import torch.fx
 from torch.ops import aten
 
 from ..op_registry import register_lowering, register_lowering_multiple
@@ -159,11 +161,64 @@ class AtenOpLowering(MLIRLowering):
 # Each is registered to use the generic AtenOpLowering with appropriate op name
 
 @register_lowering(aten.addmm.default)
-class AddmmLowering(AtenOpLowering):
-    """Lowering for aten.addmm (matrix multiply with add)."""
+class AddmmLowering(MLIRLowering):
+    """Lowering for aten.addmm (matrix multiply with add) -> linalg.matmul.
     
-    def __init__(self):
-        super().__init__("aten.addmm")
+    aten.addmm(bias, mat1, mat2) computes: bias + mat1 @ mat2
+    linalg.matmul accumulates into output: out = out + mat1 @ mat2
+    
+    So we use bias as the output tensor, and linalg.matmul will accumulate into it.
+    """
+    
+    def emit(self, ctx: "LoweringContext", node: "torch.fx.Node") -> str | None:
+        builder = ctx.builder
+        
+        # Get operands: addmm(bias, mat1, mat2)
+        operands = []
+        for arg in node.args:
+            if isinstance(arg, torch.fx.Node):
+                ssa = ctx.fx_value_map.get(arg.name, f"%{arg.name}")
+                operands.append(ssa)
+        
+        if len(operands) < 3:
+            # Fall back to generic handling if wrong number of operands
+            return self._emit_call_torch(ctx, node)
+        
+        bias_ssa, mat1_ssa, mat2_ssa = operands[0], operands[1], operands[2]
+        tensor_type = ctx.tensor_type
+        
+        # Emit linalg.matmul: accumulates into output tensor
+        result = builder.fresh("matmul")
+        builder.emit(
+            f'{result} = linalg.matmul '
+            f'ins({mat1_ssa}, {mat2_ssa} : {tensor_type}, {tensor_type}) '
+            f'outs({bias_ssa} : {tensor_type}) -> {tensor_type}'
+        )
+        
+        ctx.fx_value_map[node.name] = result
+        return result
+    
+    def _emit_call_torch(self, ctx: "LoweringContext", node: "torch.fx.Node") -> str:
+        """Fallback to helion.call_torch if linalg emission fails."""
+        builder = ctx.builder
+        operands = []
+        for arg in node.args:
+            if isinstance(arg, torch.fx.Node):
+                operands.append(ctx.fx_value_map.get(arg.name, f"%{arg.name}"))
+        
+        result = builder.fresh("call")
+        attrs = format_attr_dict({
+            "fn_name": format_string_attr("aten.addmm"),
+            "fx_node": format_string_attr(node.name),
+        })
+        operands_str = ", ".join(operands)
+        types_str = ", ".join([ctx.tensor_type] * len(operands))
+        builder.emit(
+            f'{result} = "helion.call_torch"({operands_str}){attrs} '
+            f": ({types_str}) -> {ctx.tensor_type}"
+        )
+        ctx.fx_value_map[node.name] = result
+        return result
 
 
 @register_lowering(aten.mm.default)

@@ -39,6 +39,13 @@ from .lowering_context import (
     collect_reduction_block_ids,
 )
 
+# Torch-MLIR integration (via FxImporter)
+from .torch_mlir_helper import (
+    TorchMLIRNodeImporter,
+    get_aten_op_info,
+    import_aten_node_to_mlir,
+)
+
 __all__ = [
     # Main entry points
     "generate_mlir",

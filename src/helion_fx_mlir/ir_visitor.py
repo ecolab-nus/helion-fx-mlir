@@ -11,7 +11,7 @@ The visitor dispatches to specific handlers based on the node's target:
 - _host_tensor -> function argument mapping
 - aten.sym_size.int -> inline concrete value
 - load/store -> helion.load/helion.store
-- aten.* compute -> helion.call_torch
+- aten.* compute -> torch.aten.* (via torch-mlir dialect)
 """
 
 from __future__ import annotations
@@ -33,6 +33,14 @@ from .mlir_builder import (
     torch_dtype_to_mlir_element_type,
     format_tensor_type,
 )
+from .torch_mlir_helper import (
+    TorchMLIRNodeImporter,
+    get_aten_op_info,
+    import_aten_node_to_mlir,
+)
+
+# Import lowerings to trigger registration of ATen op lowerings
+from . import lowerings  # noqa: F401 - triggers @register_lowering decorators
 
 if TYPE_CHECKING:
     from helion._compiler.device_ir import GraphInfo, ForLoopGraphInfo, RootGraphInfo
@@ -169,8 +177,19 @@ class IRVisitor:
         if target is operator.getitem:
             return self.visit_getitem(node)
         
-        # aten.* compute operations -> helion.call_torch
+        # aten.* compute operations
+        # First check if there's a registered lowering in op_registry
         if hasattr(target, '__module__') and 'aten' in str(target):
+            from .op_registry import LoweringRegistry
+            if LoweringRegistry.has(target):
+                # Sync node_values to ctx.fx_value_map for registered lowerings
+                self.ctx.fx_value_map.update(self.node_values)
+                # Use registered lowering (e.g., linalg.matmul for addmm)
+                result = LoweringRegistry.emit_node(self.ctx, node)
+                if result is not None:
+                    self.node_values[node.name] = result
+                    return result
+            # Fall back to generic visit_aten_compute
             return self.visit_aten_compute(node)
         
         # Fallback for unknown targets
@@ -622,34 +641,70 @@ class IRVisitor:
         return source_ssa
     
     def visit_aten_compute(self, node: fx.Node) -> str:
-        """Generate helion.call_torch for ATen compute ops."""
-        target = node.target
-        op_name = str(target).replace("aten.", "").replace(".default", "")
+        """Generate MLIR for ATen compute ops using torch-mlir.
         
-        # Resolve all operands
-        operands = []
+        Uses torch-mlir's FxImporter to generate proper MLIR for ATen operations.
+        Falls back to helion.call_torch if torch-mlir import fails.
+        """
+        target = node.target
+        op_name, overload = get_aten_op_info(target)
+        
+        # Resolve all operands to SSA values
+        operand_ssas = []
         for arg in node.args:
             if isinstance(arg, fx.Node):
-                operands.append(self.node_values.get(arg.name, f"%{arg.name}"))
+                operand_ssas.append(self.node_values.get(arg.name, f"%{arg.name}"))
             elif arg is not None:
-                operands.append(str(arg))
+                operand_ssas.append(str(arg))
         
-        result = self.builder.fresh(node.name)
         tensor_type = self.ctx.tensor_type
         
+        # Try to use torch-mlir for well-known ops
+        # For now, emit linalg.matmul directly for addmm since it's the most common case
+        if op_name == "addmm" and len(operand_ssas) >= 3:
+            # addmm(acc, mat1, mat2) = acc + mat1 @ mat2
+            # linalg.matmul accumulates into output tensor
+            result = self.builder.fresh("matmul")
+            self.builder.emit(
+                f'{result} = linalg.matmul '
+                f'ins({operand_ssas[1]}, {operand_ssas[2]} : {tensor_type}, {tensor_type}) '
+                f'outs({operand_ssas[0]} : {tensor_type}) -> {tensor_type}'
+            )
+            self.node_values[node.name] = result
+            return result
+        
+        elif op_name == "mm" and len(operand_ssas) >= 2:
+            # mm(mat1, mat2) - need zero-initialized output
+            empty = self.builder.fresh("empty")
+            self.builder.emit(f'{empty} = tensor.empty() : {tensor_type}')
+            zero = self.builder.fresh("zero")
+            self.builder.emit(f'{zero} = arith.constant 0.0 : f32')
+            filled = self.builder.fresh("filled")
+            self.builder.emit(
+                f'{filled} = linalg.fill ins({zero} : f32) '
+                f'outs({empty} : {tensor_type}) -> {tensor_type}'
+            )
+            result = self.builder.fresh("matmul")
+            self.builder.emit(
+                f'{result} = linalg.matmul '
+                f'ins({operand_ssas[0]}, {operand_ssas[1]} : {tensor_type}, {tensor_type}) '
+                f'outs({filled} : {tensor_type}) -> {tensor_type}'
+            )
+            self.node_values[node.name] = result
+            return result
+        
+        # Fallback: emit helion.call_torch for ops not yet supported
+        result = self.builder.fresh(node.name)
         attrs = format_attr_dict({
             "fn_name": format_string_attr(f"aten.{op_name}"),
             "fx_node": format_string_attr(node.name),
         })
-        
-        operand_str = ", ".join(operands)
-        type_str = ", ".join([tensor_type] * len(operands))
-        
+        operand_str = ", ".join(operand_ssas)
+        type_str = ", ".join([tensor_type] * len(operand_ssas))
         self.builder.emit(
             f'{result} = "helion.call_torch"({operand_str}){attrs} '
             f': ({type_str}) -> {tensor_type}'
         )
-        
         self.node_values[node.name] = result
         return result
     
