@@ -157,4 +157,25 @@ def Helion_HostRefOp : Helion_Op<"host_ref"> {
   let results = (outs AnyTensor:$result);
 }
 
+//===----------------------------------------------------------------------===//
+// helion.subscript
+//===----------------------------------------------------------------------===//
+
+def Helion_SubscriptOp : Helion_Op<"subscript"> {
+  let summary = "tensor subscript/view operation";
+  let description = [{
+    The `helion.subscript` op represents a tensor slicing or view operation.
+    It takes an input tensor and produces an output tensor with potentially
+    different shape/layout based on the indexing. The `indices` attribute
+    contains a string representation of the slice/index expression.
+    
+    TODO: Implement proper slice semantics with actual index operands.
+  }];
+  let arguments = (ins AnyTensor:$input,
+                       OptionalAttr<StrAttr>:$indices,
+                       OptionalAttr<StrAttr>:$fx_node);
+  let results = (outs AnyTensor:$result);
+}
+
 #endif // HELION_IR_HELIONOPS_TD
+

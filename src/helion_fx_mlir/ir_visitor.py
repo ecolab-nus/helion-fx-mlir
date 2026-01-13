@@ -25,6 +25,7 @@ from torch.ops import aten
 import helion.language.memory_ops as hl_memory_ops
 import helion.language._tracing_ops as hl_tracing_ops
 import helion.language.creation_ops as hl_creation_ops
+import helion.language.view_ops as hl_view_ops
 
 from .mlir_builder import (
     format_attr_dict,
@@ -167,6 +168,14 @@ class IRVisitor:
         if target is hl_memory_ops.store:
             return self.visit_store(node)
         
+        # _mask_to -> shortcircuit (pass through input, boundary check placeholder)
+        if target is hl_tracing_ops._mask_to:
+            return self.visit_mask_to(node)
+        
+        # subscript -> helion.subscript (view/indexing operation)
+        if target is hl_view_ops.subscript:
+            return self.visit_subscript(node)
+        
         # getitem -> map to loop result
         if target is getattr(__builtins__, 'getitem', None) or \
            (hasattr(target, '__name__') and target.__name__ == 'getitem'):
@@ -176,6 +185,10 @@ class IRVisitor:
         import operator
         if target is operator.getitem:
             return self.visit_getitem(node)
+        
+        # aten.full.default -> helion.full (handle specially, torch-mlir can't handle FX node shapes)
+        if target is aten.full.default:
+            return self.visit_aten_full(node)
         
         # aten.* compute operations
         # First check if there's a registered lowering in op_registry
@@ -194,6 +207,7 @@ class IRVisitor:
         
         # Fallback for unknown targets
         return self.visit_unknown(node)
+
     
     def visit_output(self, node: fx.Node) -> str | None:
         """Handle output nodes."""
@@ -262,13 +276,20 @@ class IRVisitor:
         fill_value = node.args[1] if len(node.args) > 1 else 0.0
         dtype = node.args[2] if len(node.args) > 2 else torch.float32
         
-        # Resolve shape to SSA values
+        # Resolve shape to SSA values - integer literals need to become arith.constant
         shape_ssa = []
         for s in shape_nodes:
             if isinstance(s, fx.Node):
                 shape_ssa.append(self.node_values.get(s.name, f"%{s.name}"))
+            elif isinstance(s, int):
+                # Integer literals need to be emitted as arith.constant
+                const_ssa = self.builder.fresh("dim")
+                self.builder.emit(f'{const_ssa} = arith.constant {s} : index')
+                shape_ssa.append(const_ssa)
             else:
+                # Fallback for other values
                 shape_ssa.append(str(s))
+
         
         ssa = self.builder.fresh("full")
         dtype_str = torch_dtype_to_mlir_element_type(dtype) if dtype else "f32"
@@ -327,7 +348,98 @@ class IRVisitor:
         
         return ssa
     
+    def visit_aten_full(self, node: fx.Node) -> str:
+        """Generate helion.full for aten.full.default (from torch.full_like).
+        
+        aten.full.default has a different signature than helion's full:
+        - args[0]: shape as list of FX nodes or ints
+        - args[1]: fill_value
+        - kwargs: dtype, layout, device, pin_memory
+        """
+        import math
+        
+        shape_nodes = node.args[0]  # List of FX nodes (e.g., block_size_0, block_size_1)
+        fill_value = node.args[1] if len(node.args) > 1 else 0.0
+        dtype = node.kwargs.get('dtype', torch.float32)
+        
+        # Resolve shape to SSA values - integer literals need to become arith.constant
+        shape_ssa = []
+        for s in shape_nodes:
+            if isinstance(s, fx.Node):
+                shape_ssa.append(self.node_values.get(s.name, f"%{s.name}"))
+            elif isinstance(s, int):
+                # Integer literals need to be emitted as arith.constant
+                const_ssa = self.builder.fresh("dim")
+                self.builder.emit(f'{const_ssa} = arith.constant {s} : index')
+                shape_ssa.append(const_ssa)
+            else:
+                # Fallback for other values
+                shape_ssa.append(str(s))
+
+        
+        ssa = self.builder.fresh("full")
+        dtype_str = torch_dtype_to_mlir_element_type(dtype) if dtype else "f32"
+        
+        # Handle special float values like -inf, inf, nan
+        fill_value_ssa = None
+        fill_value_attr = None
+        
+        if isinstance(fill_value, float) and (math.isinf(fill_value) or math.isnan(fill_value)):
+            # Emit arith.constant with IEEE 754 hex representation
+            const_ssa = self.builder.fresh("fill_val")
+            if math.isinf(fill_value):
+                if fill_value < 0:
+                    # -inf for f32 = 0xFF800000
+                    hex_val = "0xFF800000"
+                else:
+                    # +inf for f32 = 0x7F800000
+                    hex_val = "0x7F800000"
+            else:
+                # nan for f32 = 0x7FC00000
+                hex_val = "0x7FC00000"
+            
+            self.builder.emit(f'{const_ssa} = arith.constant {hex_val} : {dtype_str}')
+            fill_value_ssa = const_ssa
+        else:
+            fill_value_attr = fill_value
+        
+        # Build the op - determine tensor type based on shape dimensions
+        shape_str = ", ".join(shape_ssa)
+        type_str = ", ".join(["index"] * len(shape_ssa))
+        
+        # Generate dynamic tensor type with correct number of dimensions
+        dim_wildcards = "x".join(["?"] * len(shape_ssa))
+        tensor_type = f"tensor<{dim_wildcards}x{dtype_str}>"
+        
+        if fill_value_ssa:
+            # Pass fill value as operand
+            operands = f"{shape_str}, {fill_value_ssa}"
+            operand_types = f"{type_str}, {dtype_str}"
+            attrs = format_attr_dict({"dtype": dtype_str})
+            self.builder.emit(
+                f'{ssa} = "helion.full"({operands}){attrs} '
+                f': ({operand_types}) -> {tensor_type}'
+            )
+        else:
+            # Use fill_value as attribute
+            attrs = format_attr_dict({
+                "fill_value": fill_value_attr,
+                "dtype": dtype_str,
+            })
+            self.builder.emit(
+                f'{ssa} = "helion.full"({shape_str}){attrs} '
+                f': ({type_str}) -> {tensor_type}'
+            )
+        
+        self.node_values[node.name] = ssa
+        
+        # Track initial accumulator for phi
+        self.initial_acc_ssa[node.name] = ssa
+        
+        return ssa
+    
     def visit_for_loop(self, node: fx.Node) -> str:
+
         """Generate affine.for and visit the inner ForLoopGraphInfo."""
         graph_id = node.args[0]
         begin = node.args[1]  # [0]
@@ -640,6 +752,61 @@ class IRVisitor:
         self.node_values[node.name] = source_ssa
         return source_ssa
     
+    def visit_mask_to(self, node: fx.Node) -> str:
+        """Shortcircuit _mask_to by passing through the input tensor.
+        
+        _mask_to is used for boundary checks in Helion. For now, we simply
+        pass through the input tensor unchanged. Proper masking support
+        would require implementing actual boundary logic.
+        
+        TODO: Implement proper masking/boundary check logic.
+        """
+        tensor_node = node.args[0]
+        # mask_value = node.args[1]  # The fill value for out-of-bounds (ignored)
+        
+        # Just pass through the input tensor
+        if isinstance(tensor_node, fx.Node):
+            ssa = self.node_values.get(tensor_node.name, f"%{tensor_node.name}")
+        else:
+            ssa = str(tensor_node)
+        
+        self.node_values[node.name] = ssa
+        return ssa
+    
+    def visit_subscript(self, node: fx.Node) -> str:
+        """Generate helion.subscript for tensor view/indexing operations.
+        
+        subscript is used for tensor slicing and newaxis operations.
+        For now, we emit a placeholder helion.subscript op that returns
+        a tensor type. Proper indexing support would need to handle
+        the slice objects properly.
+        
+        TODO: Implement proper slice/index handling.
+        """
+        tensor_node = node.args[0]
+        indices = node.args[1] if len(node.args) > 1 else []
+        
+        tensor_ssa = self.node_values.get(tensor_node.name, f"%{tensor_node.name}") if isinstance(tensor_node, fx.Node) else str(tensor_node)
+        tensor_type = self.ctx.tensor_type
+        
+        result = self.builder.fresh("subscript")
+        
+        # Format indices as string attribute (simplified - ignores slice details)
+        indices_str = str(indices)
+        
+        attrs = format_attr_dict({
+            "indices": format_string_attr(indices_str),
+            "fx_node": format_string_attr(node.name),
+        })
+        
+        self.builder.emit(
+            f'{result} = "helion.subscript"({tensor_ssa}){attrs} '
+            f': ({tensor_type}) -> {tensor_type}'
+        )
+        
+        self.node_values[node.name] = result
+        return result
+    
     def visit_aten_compute(self, node: fx.Node) -> str:
         """Generate MLIR for ATen compute ops using torch-mlir.
         
@@ -691,6 +858,126 @@ class IRVisitor:
             )
             self.node_values[node.name] = result
             return result
+        
+        # -------------------------------------------------------------------------
+        # Additional ATen ops for attn.py (temporary handlers using helion.aten_op)
+        # These should eventually be handled by torch-mlir or proper linalg lowerings
+        # -------------------------------------------------------------------------
+        
+        elif op_name.startswith("bmm") and len(operand_ssas) >= 2:
+            # bmm(mat1, mat2) - batch matrix multiply
+            result = self.builder.fresh("bmm")
+            self.builder.emit(
+                f'{result} = "helion.aten_op"({operand_ssas[0]}, {operand_ssas[1]}) '
+                f'{{op = "bmm"}} : ({tensor_type}, {tensor_type}) -> {tensor_type}'
+            )
+            self.node_values[node.name] = result
+            return result
+        
+        elif op_name.startswith("baddbmm") and len(operand_ssas) >= 3:
+            # baddbmm(input, batch1, batch2) - batch add batch matrix multiply
+            result = self.builder.fresh("baddbmm")
+            self.builder.emit(
+                f'{result} = "helion.aten_op"({operand_ssas[0]}, {operand_ssas[1]}, {operand_ssas[2]}) '
+                f'{{op = "baddbmm"}} : ({tensor_type}, {tensor_type}, {tensor_type}) -> {tensor_type}'
+            )
+            self.node_values[node.name] = result
+            return result
+        
+        elif op_name.startswith("amax"):
+            # amax(input, dim) - max along dimension
+            result = self.builder.fresh("amax")
+            # Get dim from args[1] if it's a list
+            dim = node.args[1] if len(node.args) > 1 else [-1]
+            dim_str = str(dim) if isinstance(dim, list) else f"[{dim}]"
+            self.builder.emit(
+                f'{result} = "helion.aten_op"({operand_ssas[0]}) '
+                f'{{op = "amax", dim = {dim_str}}} : ({tensor_type}) -> {tensor_type}'
+            )
+            self.node_values[node.name] = result
+            return result
+        
+        elif op_name.startswith("maximum") and len(operand_ssas) >= 2:
+            # maximum(input, other) - element-wise max
+            result = self.builder.fresh("maximum")
+            self.builder.emit(
+                f'{result} = "helion.aten_op"({operand_ssas[0]}, {operand_ssas[1]}) '
+                f'{{op = "maximum"}} : ({tensor_type}, {tensor_type}) -> {tensor_type}'
+            )
+            self.node_values[node.name] = result
+            return result
+        
+        elif op_name.startswith("mul") and len(operand_ssas) >= 1:
+            # mul(input, other) - element-wise multiply
+            result = self.builder.fresh("mul")
+            # Second operand could be a scalar
+            if isinstance(node.args[1], (int, float)):
+                scalar_ssa = self.builder.fresh("scalar")
+                self.builder.emit(f'{scalar_ssa} = arith.constant {node.args[1]} : f32')
+                self.builder.emit(
+                    f'{result} = "helion.aten_op"({operand_ssas[0]}, {scalar_ssa}) '
+                    f'{{op = "mul_scalar"}} : ({tensor_type}, f32) -> {tensor_type}'
+                )
+            else:
+                self.builder.emit(
+                    f'{result} = "helion.aten_op"({operand_ssas[0]}, {operand_ssas[1]}) '
+                    f'{{op = "mul"}} : ({tensor_type}, {tensor_type}) -> {tensor_type}'
+                )
+            self.node_values[node.name] = result
+            return result
+        
+        elif op_name.startswith("sub") and len(operand_ssas) >= 2:
+            # sub(input, other) - element-wise subtract
+            result = self.builder.fresh("sub")
+            self.builder.emit(
+                f'{result} = "helion.aten_op"({operand_ssas[0]}, {operand_ssas[1]}) '
+                f'{{op = "sub"}} : ({tensor_type}, {tensor_type}) -> {tensor_type}'
+            )
+            self.node_values[node.name] = result
+            return result
+        
+        elif op_name.startswith("add") and len(operand_ssas) >= 2:
+            # add(input, other) - element-wise add
+            result = self.builder.fresh("add")
+            self.builder.emit(
+                f'{result} = "helion.aten_op"({operand_ssas[0]}, {operand_ssas[1]}) '
+                f'{{op = "add"}} : ({tensor_type}, {tensor_type}) -> {tensor_type}'
+            )
+            self.node_values[node.name] = result
+            return result
+        
+        elif op_name.startswith("exp2"):
+            # exp2(input) - element-wise 2^x
+            result = self.builder.fresh("exp2")
+            self.builder.emit(
+                f'{result} = "helion.aten_op"({operand_ssas[0]}) '
+                f'{{op = "exp2"}} : ({tensor_type}) -> {tensor_type}'
+            )
+            self.node_values[node.name] = result
+            return result
+        
+        elif op_name.startswith("sum"):
+            # sum(input, dim) - sum along dimensions
+            result = self.builder.fresh("sum")
+            dim = node.args[1] if len(node.args) > 1 else [-1]
+            dim_str = str(dim) if isinstance(dim, list) else f"[{dim}]"
+            self.builder.emit(
+                f'{result} = "helion.aten_op"({operand_ssas[0]}) '
+                f'{{op = "sum", dim = {dim_str}}} : ({tensor_type}) -> {tensor_type}'
+            )
+            self.node_values[node.name] = result
+            return result
+        
+        elif op_name.startswith("div") and len(operand_ssas) >= 2:
+            # div(input, other) - element-wise divide
+            result = self.builder.fresh("div")
+            self.builder.emit(
+                f'{result} = "helion.aten_op"({operand_ssas[0]}, {operand_ssas[1]}) '
+                f'{{op = "div"}} : ({tensor_type}, {tensor_type}) -> {tensor_type}'
+            )
+            self.node_values[node.name] = result
+            return result
+
         
         # Use torch-mlir to generate MLIR for this operation
         mlir_text = import_aten_node_to_mlir(node)

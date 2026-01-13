@@ -54,3 +54,35 @@ python examples/matmul.py
 ```
 
 This prints the Device IR and generated MLIR, then validates with `mlir-opt`.
+
+## TODO: Temporary ATen Op Patches
+
+The following ATen operations are currently handled with temporary `helion.aten_op` placeholders in `ir_visitor.py`. These should eventually be replaced with proper linalg lowerings via torch-mlir:
+
+| ATen Op | Status | Notes |
+|---------|--------|-------|
+| `aten.full.default` | ✅ Patched | `visit_aten_full()` - torch-mlir can't handle FX node shapes |
+| `aten.bmm.default` | ⚠️ Placeholder | Batch matrix multiply |
+| `aten.baddbmm.default` | ⚠️ Placeholder | Batch add batch matrix multiply |
+| `aten.amax.default` | ⚠️ Placeholder | Max along dimension |
+| `aten.maximum.default` | ⚠️ Placeholder | Element-wise max |
+| `aten.mul.Tensor` | ⚠️ Placeholder | Element-wise/scalar multiply |
+| `aten.sub.Tensor` | ⚠️ Placeholder | Element-wise subtract |
+| `aten.add.Tensor` | ⚠️ Placeholder | Element-wise add |
+| `aten.exp2.default` | ⚠️ Placeholder | Element-wise 2^x |
+| `aten.sum.dim_IntList` | ⚠️ Placeholder | Sum along dimensions |
+| `aten.div.Tensor` | ⚠️ Placeholder | Element-wise divide |
+
+### Helion-Specific Operations
+
+| Operation | Status | Notes |
+|-----------|--------|-------|
+| `_mask_to` | ✅ Shortcircuit | Passes through input tensor; boundary checks ignored for now |
+| `subscript` | ✅ `helion.subscript` | Emits placeholder op; proper slice handling TODO |
+
+### Long-term Solution
+These temporary patches should be replaced by either:
+1. Proper torch-mlir integration once it supports dynamic FX node shapes
+2. Custom linalg lowerings registered via `@register_lowering` decorator
+3. Full implementation of `_mask_to` boundary checking logic
+4. Proper slice/index operand handling in `helion.subscript`
