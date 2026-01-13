@@ -18,12 +18,15 @@
 # - Helion targets Linux. The environment markers below avoid installing it (and Triton) on non-Linux systems.
 # - If you specifically need/avoid Helion or Triton, you can edit the lines with the markers or install them separately.
 
-torch
-torchvision
-torchaudio
 triton>=3.5 ; sys_platform == "linux"
 helion ; sys_platform == "linux"
-pydantic>=1.10,<2
+pydantic
 packaging
 pytest
 tabulate
+--extra-index-url https://download.pytorch.org/whl/nightly/cpu
+-f https://github.com/llvm/torch-mlir-release/releases/expanded_assets/dev-wheels
+torch-mlir
+torch
+torchaudio
+torchvision
