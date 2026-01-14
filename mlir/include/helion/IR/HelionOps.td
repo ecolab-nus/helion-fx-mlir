@@ -25,57 +25,6 @@ class Helion_Op<string mnemonic, list<Trait> traits = []> :
     Op<Helion_Dialect, mnemonic, traits>;
 
 //===----------------------------------------------------------------------===//
-// helion.alloc_like
-//===----------------------------------------------------------------------===//
-
-def Helion_AllocLikeOp : Helion_Op<"alloc_like"> {
-  let summary = "allocate a tensor like the source operand";
-  let description = [{
-    The `helion.alloc_like` op materialises a tensor SSA value matching the
-    element type of the source operand.  The optional `shape` array attribute
-    records the extents that Helion computed for the allocation with `-1`
-    denoting a dynamic dimension.
-  }];
-  let arguments = (ins AnyTensor:$input,
-                       OptionalAttr<ArrayAttr>:$shape);
-  let results = (outs AnyTensor:$result);
-}
-
-//===----------------------------------------------------------------------===//
-// helion.zero_tile
-//===----------------------------------------------------------------------===//
-
-def Helion_ZeroTileOp : Helion_Op<"zero_tile"> {
-  let summary = "create a tensor tile initialised to zero";
-  let description = [{
-    The `helion.zero_tile` op produces a tile tensor pre-filled with zeros.
-    The op carries the logical tile `shape` (using `-1` for dynamic sizes) and
-    the destination `dtype`.
-  }];
-  let arguments = (ins ArrayAttr:$shape,
-                       TypeAttr:$dtype);
-  let results = (outs AnyTensor:$result);
-}
-
-//===----------------------------------------------------------------------===//
-// helion.load
-//===----------------------------------------------------------------------===//
-
-def Helion_LoadOp : Helion_Op<"load"> {
-  let summary = "load a dynamically sized tensor tile";
-  let description = [{
-    Loads a tile slice from the source tensor. The `indices` attribute contains
-    string representations of the indexing expressions for debugging/analysis.
-  }];
-  let arguments = (ins AnyTensor:$source,
-                       OptionalAttr<ArrayAttr>:$indices,
-                       OptionalAttr<StrAttr>:$fx_node);
-  let results = (outs AnyTensor:$result);
-}
-
-
-
-//===----------------------------------------------------------------------===//
 // helion.phi
 //===----------------------------------------------------------------------===//
 
@@ -88,38 +37,6 @@ def Helion_PhiOp : Helion_Op<"phi"> {
                        AnyTensor:$current,
                        OptionalAttr<StrAttr>:$fx_node);
   let results = (outs AnyTensor:$result);
-}
-
-//===----------------------------------------------------------------------===//
-// helion.store
-//===----------------------------------------------------------------------===//
-
-def Helion_StoreOp : Helion_Op<"store"> {
-  let summary = "store a dynamically sized tensor tile";
-  let description = [{
-    Stores the tile back into the destination tensor. The `indices` attribute 
-    contains string representations of the indexing expressions for debugging/analysis.
-  }];
-  let arguments = (ins AnyTensor:$destination,
-                       AnyTensor:$tile_value,
-                       OptionalAttr<ArrayAttr>:$indices,
-                       OptionalAttr<StrAttr>:$fx_node);
-  let results = (outs);
-}
-
-//===----------------------------------------------------------------------===//
-// helion.get_module_attribute
-//===----------------------------------------------------------------------===//
-
-def Helion_GetModuleAttributeOp : Helion_Op<"get_module_attribute"> {
-  let summary = "get a module attribute value";
-  let description = [{
-    The `helion.get_module_attribute` op retrieves a named attribute from the
-    parent module and returns it as an SSA value.  This is used to access
-    compile-time parameters (e.g., tile sizes) stored as module attributes.
-  }];
-  let arguments = (ins StrAttr:$attr_name);
-  let results = (outs Index:$result);
 }
 
 //===----------------------------------------------------------------------===//

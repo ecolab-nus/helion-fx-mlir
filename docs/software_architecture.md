@@ -201,8 +201,8 @@ src/helion_fx_mlir/
 | `aten.bmm` | **torch-mlir** | `torch.aten.bmm` |
 | `aten.exp` | **torch-mlir** | `torch.aten.exp` |
 | `aten.div.Tensor` | **torch-mlir** | `torch.aten.div.Tensor` |
-| `load` | **this project** | `helion.load` |
-| `store` | **this project** | `helion.store` |
+| `load` | **this project** | `tensor.extract_slice` |
+| `store` | **this project** | `tensor.insert_slice` |
 | `_for_loop` | **this project** | `affine.for` |
 | `_phi` | **this project** | `helion.phi` |
 | `full` | **this project** | `tensor.empty` + `linalg.fill` |

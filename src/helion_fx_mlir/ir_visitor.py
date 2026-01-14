@@ -10,7 +10,8 @@ The visitor dispatches to specific handlers based on the node's target:
 - _phi -> helion.phi
 - _host_tensor -> function argument mapping
 - aten.sym_size.int -> inline concrete value
-- load/store -> helion.load/helion.store
+- load -> tensor.extract_slice
+- store -> tensor.insert_slice
 - aten.* compute -> torch.aten.* (via torch-mlir dialect)
 """
 
@@ -160,11 +161,11 @@ class IRVisitor:
         if target is aten.sym_size.int:
             return self.visit_sym_size(node)
         
-        # load -> helion.load
+        # load -> tensor.extract_slice
         if target is hl_memory_ops.load:
             return self.visit_load(node)
         
-        # store -> helion.store
+        # store -> tensor.insert_slice
         if target is hl_memory_ops.store:
             return self.visit_store(node)
         
@@ -665,79 +666,210 @@ class IRVisitor:
         return iv_name
     
     def visit_load(self, node: fx.Node) -> str:
-        """Generate helion.load with affine expressions."""
+        """Generate tensor.extract_slice for tile loading.
+        
+        Replaces the custom helion.load with standard MLIR tensor.extract_slice.
+        The extract_slice operation takes offsets, sizes, and strides to
+        extract a sub-tensor from the source.
+        
+        For tiled access like x[tile_m, tile_k]:
+        - offsets come from loop IVs multiplied by tile sizes
+        - sizes come from the tile dimensions (block sizes)
+        - strides are 1 for contiguous access
+        """
         tensor_node = node.args[0]
-        indices = node.args[1]  # [sym_size_int, block_size_2]
+        indices = node.args[1]  # [sym_size_int, block_size_2] or [block_size_0, block_size_1, slice(...)]
         
         tensor_ssa = self.node_values.get(tensor_node.name, f"%{tensor_node.name}")
         tensor_type = self._get_tensor_type(tensor_node)
         
-        # Build indices
-        indices_ssa = []
-        for idx in indices:
-            if isinstance(idx, fx.Node):
-                indices_ssa.append(self.node_values.get(idx.name, f"%{idx.name}"))
-            else:
-                indices_ssa.append(str(idx))
+        # Collect offset and size SSA values for each dimension
+        offsets_ssa = []
+        sizes_ssa = []
         
-        result = self.builder.fresh("load")
+        for i, idx in enumerate(indices):
+            if isinstance(idx, slice):
+                # Full dimension slice - offset=0, size comes from tensor dim
+                zero_ssa = self.builder.fresh("zero")
+                self.builder.emit(f'{zero_ssa} = arith.constant 0 : index')
+                offsets_ssa.append(zero_ssa)
+                
+                # Get dimension size from tensor
+                dim_ssa = self.builder.fresh("dim")
+                dim_idx_ssa = self.builder.fresh("dim_idx")
+                self.builder.emit(f'{dim_idx_ssa} = arith.constant {i} : index')
+                self.builder.emit(f'{dim_ssa} = tensor.dim {tensor_ssa}, {dim_idx_ssa} : {tensor_type}')
+                sizes_ssa.append(dim_ssa)
+            elif isinstance(idx, fx.Node):
+                # Get the SSA value for this index
+                idx_ssa = self.node_values.get(idx.name, f"%{idx.name}")
+                
+                # Determine if this is a loop IV (sym_size_int) or a block size
+                if 'sym_size' in idx.name:
+                    # sym_size_int represents the tile index within the iteration
+                    # The offset is: loop_iv * block_size
+                    # For now, use loop IV directly as it's already scaled
+                    offsets_ssa.append(idx_ssa)
+                    
+                    # Size needs to come from block_size - look for corresponding block_size
+                    # For now, emit a symbolic size lookup
+                    size_ssa = self.builder.fresh("tile_size")
+                    self.builder.emit(f'{size_ssa} = "loom.get_symbol"() {{name = "tile_size_{i}"}} : () -> index')
+                    sizes_ssa.append(size_ssa)
+                elif 'block_size' in idx.name:
+                    # block_size node indicates the tile size for this dimension
+                    # The offset comes from the corresponding loop IV
+                    # Compute offset: iv * block_size
+                    
+                    # Get the current loop IV
+                    if hasattr(self, 'current_loop_ivs') and i < len(self.current_loop_ivs):
+                        iv_ssa = self.current_loop_ivs[i]
+                    else:
+                        iv_ssa = f"%iv_block{i}"
+                    
+                    # Compute offset: iv * block_size
+                    offset_ssa = self.builder.fresh("offset")
+                    self.builder.emit(
+                        f'{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index'
+                    )
+                    offsets_ssa.append(offset_ssa)
+                    sizes_ssa.append(idx_ssa)
+                else:
+                    # Generic index - treat as offset with unknown size
+                    offsets_ssa.append(idx_ssa)
+                    size_ssa = self.builder.fresh("size")
+                    self.builder.emit(f'{size_ssa} = arith.constant 1 : index')
+                    sizes_ssa.append(size_ssa)
+            elif isinstance(idx, int):
+                # Integer literal offset
+                offset_ssa = self.builder.fresh("offset")
+                self.builder.emit(f'{offset_ssa} = arith.constant {idx} : index')
+                offsets_ssa.append(offset_ssa)
+                size_ssa = self.builder.fresh("size")
+                self.builder.emit(f'{size_ssa} = arith.constant 1 : index')
+                sizes_ssa.append(size_ssa)
+            else:
+                # Fallback
+                offset_ssa = self.builder.fresh("offset")
+                self.builder.emit(f'{offset_ssa} = arith.constant 0 : index')
+                offsets_ssa.append(offset_ssa)
+                size_ssa = self.builder.fresh("size")
+                self.builder.emit(f'{size_ssa} = arith.constant 1 : index')
+                sizes_ssa.append(size_ssa)
+        
+        result = self.builder.fresh("slice")
         result_type = self.ctx.tensor_type
         
-        # Format indices as attribute
-        indices_attr = format_indices_attr(indices_ssa)
+        # Format as tensor.extract_slice
+        rank = len(indices)
+        offsets_str = ", ".join(offsets_ssa)
+        sizes_str = ", ".join(sizes_ssa)
+        strides_str = ", ".join(["1"] * rank)
         
-        attrs = format_attr_dict({
-            "indices": indices_attr,
-            "fx_node": format_string_attr(node.name),
-        })
-        
+        # Use tensor.extract_slice syntax
         self.builder.emit(
-            f'{result} = "helion.load"({tensor_ssa}){attrs} '
-            f': ({tensor_type}) -> {result_type}'
+            f'{result} = tensor.extract_slice {tensor_ssa}[{offsets_str}][{sizes_str}][{strides_str}] : '
+            f'{tensor_type} to {result_type}'
         )
         
         self.node_values[node.name] = result
         return result
     
     def visit_store(self, node: fx.Node) -> str:
-        """Generate helion.store with affine expressions."""
+        """Generate tensor.insert_slice for tile storing.
+        
+        Replaces the custom helion.store with standard MLIR tensor.insert_slice.
+        The insert_slice operation inserts a tile back into the destination tensor.
+        
+        For tiled store like out[tile_m, tile_n] = acc:
+        - offsets come from loop IVs multiplied by tile sizes
+        - sizes come from the tile dimensions
+        - strides are 1 for contiguous access
+        """
         tensor_node = node.args[0]
         indices = node.args[1]
         value = node.args[2]
         
         tensor_ssa = self.node_values.get(tensor_node.name, f"%{tensor_node.name}")
-        
-        # Use output tensor type if this is the output
-        if self.output_tensor_type:
-            tensor_type = self.output_tensor_type
-        else:
-            tensor_type = self._get_tensor_type(tensor_node)
+        tensor_type = self.ctx.tensor_type  # Use dynamic type for destination
         
         value_ssa = self.node_values.get(value.name, f"%{value.name}") if isinstance(value, fx.Node) else str(value)
         value_type = self.ctx.tensor_type
         
-        # Build indices
-        indices_ssa = []
-        for idx in indices:
-            if isinstance(idx, fx.Node):
-                indices_ssa.append(self.node_values.get(idx.name, f"%{idx.name}"))
+        # Collect offset and size SSA values for each dimension
+        offsets_ssa = []
+        sizes_ssa = []
+        
+        for i, idx in enumerate(indices):
+            if isinstance(idx, slice):
+                # Full dimension slice - offset=0, size comes from source tensor dim
+                zero_ssa = self.builder.fresh("zero")
+                self.builder.emit(f'{zero_ssa} = arith.constant 0 : index')
+                offsets_ssa.append(zero_ssa)
+                
+                # Get dimension size from value tensor
+                dim_ssa = self.builder.fresh("dim")
+                dim_idx_ssa = self.builder.fresh("dim_idx")
+                self.builder.emit(f'{dim_idx_ssa} = arith.constant {i} : index')
+                self.builder.emit(f'{dim_ssa} = tensor.dim {value_ssa}, {dim_idx_ssa} : {value_type}')
+                sizes_ssa.append(dim_ssa)
+            elif isinstance(idx, fx.Node):
+                idx_ssa = self.node_values.get(idx.name, f"%{idx.name}")
+                
+                if 'sym_size' in idx.name:
+                    # Tile index as offset
+                    offsets_ssa.append(idx_ssa)
+                    # Size from a symbol lookup
+                    size_ssa = self.builder.fresh("tile_size")
+                    self.builder.emit(f'{size_ssa} = "loom.get_symbol"() {{name = "tile_size_{i}"}} : () -> index')
+                    sizes_ssa.append(size_ssa)
+                elif 'block_size' in idx.name:
+                    # block_size indicates the tile size, compute offset
+                    if hasattr(self, 'current_loop_ivs') and i < len(self.current_loop_ivs):
+                        iv_ssa = self.current_loop_ivs[i]
+                    else:
+                        iv_ssa = f"%iv_block{i}"
+                    
+                    offset_ssa = self.builder.fresh("offset")
+                    self.builder.emit(f'{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index')
+                    offsets_ssa.append(offset_ssa)
+                    sizes_ssa.append(idx_ssa)
+                else:
+                    offsets_ssa.append(idx_ssa)
+                    size_ssa = self.builder.fresh("size")
+                    self.builder.emit(f'{size_ssa} = arith.constant 1 : index')
+                    sizes_ssa.append(size_ssa)
+            elif isinstance(idx, int):
+                offset_ssa = self.builder.fresh("offset")
+                self.builder.emit(f'{offset_ssa} = arith.constant {idx} : index')
+                offsets_ssa.append(offset_ssa)
+                size_ssa = self.builder.fresh("size")
+                self.builder.emit(f'{size_ssa} = arith.constant 1 : index')
+                sizes_ssa.append(size_ssa)
             else:
-                indices_ssa.append(str(idx))
+                offset_ssa = self.builder.fresh("offset")
+                self.builder.emit(f'{offset_ssa} = arith.constant 0 : index')
+                offsets_ssa.append(offset_ssa)
+                size_ssa = self.builder.fresh("size")
+                self.builder.emit(f'{size_ssa} = arith.constant 1 : index')
+                sizes_ssa.append(size_ssa)
         
-        indices_attr = format_indices_attr(indices_ssa)
+        result = self.builder.fresh("inserted")
         
-        attrs = format_attr_dict({
-            "indices": indices_attr,
-            "fx_node": format_string_attr(node.name),
-        })
+        # Format as tensor.insert_slice
+        rank = len(indices)
+        offsets_str = ", ".join(offsets_ssa)
+        sizes_str = ", ".join(sizes_ssa)
+        strides_str = ", ".join(["1"] * rank)
         
+        # tensor.insert_slice %source into %dest[offsets][sizes][strides] : source_type into dest_type
         self.builder.emit(
-            f'"helion.store"({tensor_ssa}, {value_ssa}){attrs} '
-            f': ({tensor_type}, {value_type}) -> ()'
+            f'{result} = tensor.insert_slice {value_ssa} into {tensor_ssa}[{offsets_str}][{sizes_str}][{strides_str}] : '
+            f'{value_type} into {tensor_type}'
         )
         
-        self.node_values[node.name] = tensor_ssa  # Store doesn't produce a new value
-        return tensor_ssa
+        self.node_values[node.name] = result
+        return result
     
     def visit_getitem(self, node: fx.Node) -> str:
         """Map getitem to the corresponding loop result.

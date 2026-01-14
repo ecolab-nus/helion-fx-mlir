@@ -29,7 +29,7 @@ The system maps operations from two sources:
 | Operation Type | Examples | Generated Dialect |
 |----------------|----------|-------------------|
 | **Control Flow** | loops, phi nodes | `affine`, `helion` |
-| **Memory** | load, store, alloc | `helion`, `tensor` |
+| **Memory** | load, store, alloc | `tensor`, `helion` |
 | **Compute** | addmm, mul, div | `linalg`, `arith` |
 
 For a detailed mapping reference, see the [Architecture Documentation](docs/software_architecture.md#op-mapping-reference-generators).

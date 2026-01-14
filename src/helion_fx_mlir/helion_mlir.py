@@ -10,7 +10,8 @@ corresponding MLIR operation:
 - _phi -> helion.phi
 - _host_tensor -> function argument mapping
 - aten.sym_size.int -> inline concrete value
-- load/store -> helion.load/helion.store
+- load -> tensor.extract_slice
+- store -> tensor.insert_slice
 
 Architecture:
 - IRVisitor: Walks FX graphs and generates MLIR via handlers
@@ -150,8 +151,10 @@ def generate_mlir(
         ssa_name = f"%{tensor_name}"
         
         if tensor_name == 'out':
-            # Output tensor - use inferred shape
-            tensor_type = format_tensor_type(full_shape, ctx.element_type)
+            # Output tensor - use dynamic type like other _host_tensor parameters
+            # The 'out' tensor comes from _host_tensor('out') and should be treated
+            # the same as input tensors (dynamic shape)
+            tensor_type = ctx.tensor_type
         elif tensor_name in kernel_arg_by_name:
             # This is a kernel arg that's also used in Device IR
             tensor_type = kernel_arg_by_name[tensor_name].mlir_type or ctx.tensor_type

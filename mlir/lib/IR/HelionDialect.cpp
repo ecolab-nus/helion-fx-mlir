@@ -14,14 +14,8 @@ using namespace helion;
 
 void HelionDialect::initialize() {
   addOperations<
-      AllocLikeOp,
-
-      FullOp,
       GetModuleAttributeOp,
       HostRefOp,
-      LoadOp,
-      PhiOp,
-      StoreOp,
-      ZeroTileOp
+      PhiOp
       >();
 }
