@@ -58,25 +58,6 @@ def Helion_ZeroTileOp : Helion_Op<"zero_tile"> {
 }
 
 //===----------------------------------------------------------------------===//
-// helion.full
-//===----------------------------------------------------------------------===//
-
-def Helion_FullOp : Helion_Op<"full"> {
-  let summary = "create a tensor tile filled with a constant value";
-  let description = [{
-    The `helion.full` op produces a tile tensor pre-filled with a constant value.
-    The dimensions are passed as index operands. The fill value can be passed:
-    - As an optional `fill_value` F64 attribute for normal values
-    - As an optional f32 operand for special values like -inf (using arith.constant)
-    The `dtype` specifies the result element type.
-  }];
-  let arguments = (ins Variadic<AnyTypeOf<[Index, AnyFloat]>>:$operands,
-                       OptionalAttr<F64Attr>:$fill_value,
-                       TypeAttr:$dtype);
-  let results = (outs AnyTensor:$result);
-}
-
-//===----------------------------------------------------------------------===//
 // helion.load
 //===----------------------------------------------------------------------===//
 
@@ -139,22 +120,6 @@ def Helion_GetModuleAttributeOp : Helion_Op<"get_module_attribute"> {
   }];
   let arguments = (ins StrAttr:$attr_name);
   let results = (outs Index:$result);
-}
-//===----------------------------------------------------------------------===//
-// helion.host_ref
-//===----------------------------------------------------------------------===//
-
-def Helion_HostRefOp : Helion_Op<"host_ref"> {
-  let summary = "reference to a derived/intermediate host tensor";
-  let description = [{
-    The `helion.host_ref` op represents a reference to a tensor that exists on
-    the host but is not a direct kernel argument. These are typically view/reshape
-    operations of input tensors (e.g., k_view, q_view in attention kernels).
-    The op carries a `name` attribute to identify which host tensor is referenced.
-  }];
-  let arguments = (ins StrAttr:$name,
-                       OptionalAttr<StrAttr>:$fx_node);
-  let results = (outs AnyTensor:$result);
 }
 
 //===----------------------------------------------------------------------===//

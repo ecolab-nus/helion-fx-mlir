@@ -205,7 +205,7 @@ src/helion_fx_mlir/
 | `store` | **this project** | `helion.store` |
 | `_for_loop` | **this project** | `affine.for` |
 | `_phi` | **this project** | `helion.phi` |
-| `full` | **this project** | `helion.full` |
+| `full` | **this project** | `tensor.empty` + `linalg.fill` |
 
 ---
 

@@ -5,7 +5,7 @@ to MLIR by walking FX graph nodes instruction-by-instruction.
 
 The visitor dispatches to specific handlers based on the node's target:
 - _get_symnode -> loom.get_symbol
-- full -> helion.full
+- full -> tensor.empty + linalg.fill
 - _for_loop -> affine.for + recursive visit
 - _phi -> helion.phi
 - _host_tensor -> function argument mapping
@@ -136,7 +136,7 @@ class IRVisitor:
         if target is hl_tracing_ops._get_symnode:
             return self.visit_get_symnode(node)
         
-        # full -> helion.full
+        # full -> tensor.empty + linalg.fill
         if target is hl_creation_ops.full:
             return self.visit_full(node)
         
@@ -186,7 +186,7 @@ class IRVisitor:
         if target is operator.getitem:
             return self.visit_getitem(node)
         
-        # aten.full.default -> helion.full (handle specially, torch-mlir can't handle FX node shapes)
+        # aten.full.default -> tensor.empty + linalg.fill
         if target is aten.full.default:
             return self.visit_aten_full(node)
         
@@ -267,10 +267,14 @@ class IRVisitor:
         return ssa
     
     def visit_full(self, node: fx.Node) -> str:
-        """Generate helion.full for tensor initialization.
+        """Generate tensor.empty + linalg.fill for tensor initialization.
+        
+        Replaces the custom helion.full with standard MLIR dialects:
+        - tensor.empty to create an uninitialized tensor
+        - linalg.fill to fill it with the specified value
         
         For special values like -inf, we emit arith.constant with IEEE 754 hex 
-        representation and pass it as an operand to helion.full.
+        representation.
         """
         import math
         
@@ -291,67 +295,54 @@ class IRVisitor:
             else:
                 # Fallback for other values
                 shape_ssa.append(str(s))
-
         
-        ssa = self.builder.fresh("full")
         dtype_str = torch_dtype_to_mlir_element_type(dtype) if dtype else "f32"
         
-        # Handle special float values like -inf, inf, nan
-        fill_value_ssa = None
-        fill_value_attr = None
+        # Generate dynamic tensor type with correct number of dimensions
+        dim_wildcards = "x".join(["?"] * len(shape_ssa))
+        tensor_type = f"tensor<{dim_wildcards}x{dtype_str}>"
         
+        # Step 1: Emit tensor.empty
+        empty_ssa = self.builder.fresh("empty")
+        shape_str = ", ".join(shape_ssa)
+        self.builder.emit(f'{empty_ssa} = tensor.empty({shape_str}) : {tensor_type}')
+        
+        # Step 2: Emit fill value constant
+        fill_val_ssa = self.builder.fresh("fill_val")
         if isinstance(fill_value, float) and (math.isinf(fill_value) or math.isnan(fill_value)):
-            # Emit arith.constant with IEEE 754 hex representation
-            const_ssa = self.builder.fresh("fill_val")
+            # Handle special float values with IEEE 754 hex representation
             if math.isinf(fill_value):
                 if fill_value < 0:
-                    # -inf for f32 = 0xFF800000
-                    hex_val = "0xFF800000"
+                    hex_val = "0xFF800000"  # -inf for f32
                 else:
-                    # +inf for f32 = 0x7F800000
-                    hex_val = "0x7F800000"
+                    hex_val = "0x7F800000"  # +inf for f32
             else:
-                # nan for f32 = 0x7FC00000
-                hex_val = "0x7FC00000"
-            
-            self.builder.emit(f'{const_ssa} = arith.constant {hex_val} : {dtype_str}')
-            fill_value_ssa = const_ssa
+                hex_val = "0x7FC00000"  # nan for f32
+            self.builder.emit(f'{fill_val_ssa} = arith.constant {hex_val} : {dtype_str}')
         else:
-            fill_value_attr = fill_value
+            # Regular float value
+            self.builder.emit(f'{fill_val_ssa} = arith.constant {fill_value} : {dtype_str}')
         
-        # Build the op
-        shape_str = ", ".join(shape_ssa)
-        type_str = ", ".join(["index"] * len(shape_ssa))
+        # Step 3: Emit linalg.fill
+        filled_ssa = self.builder.fresh("filled")
+        self.builder.emit(
+            f'{filled_ssa} = linalg.fill ins({fill_val_ssa} : {dtype_str}) '
+            f'outs({empty_ssa} : {tensor_type}) -> {tensor_type}'
+        )
         
-        if fill_value_ssa:
-            # Pass fill value as operand
-            operands = f"{shape_str}, {fill_value_ssa}"
-            operand_types = f"{type_str}, {dtype_str}"
-            attrs = format_attr_dict({"dtype": dtype_str})
-            self.builder.emit(
-                f'{ssa} = "helion.full"({operands}){attrs} '
-                f': ({operand_types}) -> tensor<?x?x{dtype_str}>'
-            )
-        else:
-            # Use fill_value as attribute
-            attrs = format_attr_dict({
-                "fill_value": fill_value_attr,
-                "dtype": dtype_str,
-            })
-            self.builder.emit(
-                f'{ssa} = "helion.full"({shape_str}){attrs} '
-                f': ({type_str}) -> tensor<?x?x{dtype_str}>'
-            )
-        
-        self.node_values[node.name] = ssa
+        self.node_values[node.name] = filled_ssa
         
         # Track initial accumulator for phi
-        self.initial_acc_ssa[node.name] = ssa
+        self.initial_acc_ssa[node.name] = filled_ssa
         
-        return ssa
+        return filled_ssa
     
     def visit_aten_full(self, node: fx.Node) -> str:
-        """Generate helion.full for aten.full.default (from torch.full_like).
+        """Generate tensor.empty + linalg.fill for aten.full.default (from torch.full_like).
+        
+        Replaces the custom helion.full with standard MLIR dialects:
+        - tensor.empty to create an uninitialized tensor
+        - linalg.fill to fill it with the specified value
         
         aten.full.default has a different signature than helion's full:
         - args[0]: shape as list of FX nodes or ints
@@ -377,68 +368,47 @@ class IRVisitor:
             else:
                 # Fallback for other values
                 shape_ssa.append(str(s))
-
         
-        ssa = self.builder.fresh("full")
         dtype_str = torch_dtype_to_mlir_element_type(dtype) if dtype else "f32"
-        
-        # Handle special float values like -inf, inf, nan
-        fill_value_ssa = None
-        fill_value_attr = None
-        
-        if isinstance(fill_value, float) and (math.isinf(fill_value) or math.isnan(fill_value)):
-            # Emit arith.constant with IEEE 754 hex representation
-            const_ssa = self.builder.fresh("fill_val")
-            if math.isinf(fill_value):
-                if fill_value < 0:
-                    # -inf for f32 = 0xFF800000
-                    hex_val = "0xFF800000"
-                else:
-                    # +inf for f32 = 0x7F800000
-                    hex_val = "0x7F800000"
-            else:
-                # nan for f32 = 0x7FC00000
-                hex_val = "0x7FC00000"
-            
-            self.builder.emit(f'{const_ssa} = arith.constant {hex_val} : {dtype_str}')
-            fill_value_ssa = const_ssa
-        else:
-            fill_value_attr = fill_value
-        
-        # Build the op - determine tensor type based on shape dimensions
-        shape_str = ", ".join(shape_ssa)
-        type_str = ", ".join(["index"] * len(shape_ssa))
         
         # Generate dynamic tensor type with correct number of dimensions
         dim_wildcards = "x".join(["?"] * len(shape_ssa))
         tensor_type = f"tensor<{dim_wildcards}x{dtype_str}>"
         
-        if fill_value_ssa:
-            # Pass fill value as operand
-            operands = f"{shape_str}, {fill_value_ssa}"
-            operand_types = f"{type_str}, {dtype_str}"
-            attrs = format_attr_dict({"dtype": dtype_str})
-            self.builder.emit(
-                f'{ssa} = "helion.full"({operands}){attrs} '
-                f': ({operand_types}) -> {tensor_type}'
-            )
-        else:
-            # Use fill_value as attribute
-            attrs = format_attr_dict({
-                "fill_value": fill_value_attr,
-                "dtype": dtype_str,
-            })
-            self.builder.emit(
-                f'{ssa} = "helion.full"({shape_str}){attrs} '
-                f': ({type_str}) -> {tensor_type}'
-            )
+        # Step 1: Emit tensor.empty
+        empty_ssa = self.builder.fresh("empty")
+        shape_str = ", ".join(shape_ssa)
+        self.builder.emit(f'{empty_ssa} = tensor.empty({shape_str}) : {tensor_type}')
         
-        self.node_values[node.name] = ssa
+        # Step 2: Emit fill value constant
+        fill_val_ssa = self.builder.fresh("fill_val")
+        if isinstance(fill_value, float) and (math.isinf(fill_value) or math.isnan(fill_value)):
+            # Handle special float values with IEEE 754 hex representation
+            if math.isinf(fill_value):
+                if fill_value < 0:
+                    hex_val = "0xFF800000"  # -inf for f32
+                else:
+                    hex_val = "0x7F800000"  # +inf for f32
+            else:
+                hex_val = "0x7FC00000"  # nan for f32
+            self.builder.emit(f'{fill_val_ssa} = arith.constant {hex_val} : {dtype_str}')
+        else:
+            # Regular float value
+            self.builder.emit(f'{fill_val_ssa} = arith.constant {fill_value} : {dtype_str}')
+        
+        # Step 3: Emit linalg.fill
+        filled_ssa = self.builder.fresh("filled")
+        self.builder.emit(
+            f'{filled_ssa} = linalg.fill ins({fill_val_ssa} : {dtype_str}) '
+            f'outs({empty_ssa} : {tensor_type}) -> {tensor_type}'
+        )
+        
+        self.node_values[node.name] = filled_ssa
         
         # Track initial accumulator for phi
-        self.initial_acc_ssa[node.name] = ssa
+        self.initial_acc_ssa[node.name] = filled_ssa
         
-        return ssa
+        return filled_ssa
     
     def visit_for_loop(self, node: fx.Node) -> str:
 

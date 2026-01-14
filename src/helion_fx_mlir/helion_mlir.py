@@ -5,7 +5,7 @@ instruction-by-instruction. Each Device IR operation is mapped to a
 corresponding MLIR operation:
 
 - _get_symnode -> loom.get_symbol
-- full -> helion.full
+- full -> tensor.empty + linalg.fill
 - _for_loop -> affine.for + recursive visit
 - _phi -> helion.phi
 - _host_tensor -> function argument mapping

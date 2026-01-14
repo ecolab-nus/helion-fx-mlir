@@ -43,9 +43,8 @@ cmake -S . -B build
 cmake --build build --target helion-opt
 ```
 
-This produces `build/mlir/helion-opt`. Note that new ops like `helion.full` and
-`loom.get_symbol` require using `mlir-opt -allow-unregistered-dialect` until
-they are registered in the C++ dialect.
+This produces `build/mlir/helion-opt`. Note that ops like `loom.get_symbol` require 
+using `mlir-opt -allow-unregistered-dialect` until they are registered in the C++ dialect.
 
 ## Running Examples
 
@@ -61,7 +60,7 @@ The following ATen operations are currently handled with temporary `helion.aten_
 
 | ATen Op | Status | Notes |
 |---------|--------|-------|
-| `aten.full.default` | ✅ Patched | `visit_aten_full()` - torch-mlir can't handle FX node shapes |
+| `aten.full.default` | ✅ Done | Uses `tensor.empty` + `linalg.fill` |
 | `aten.bmm.default` | ⚠️ Placeholder | Batch matrix multiply |
 | `aten.baddbmm.default` | ⚠️ Placeholder | Batch add batch matrix multiply |
 | `aten.amax.default` | ⚠️ Placeholder | Max along dimension |
