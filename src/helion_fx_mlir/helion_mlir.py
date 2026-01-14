@@ -44,6 +44,37 @@ HELION_OPT_CANDIDATES = [
 ]
 
 
+def _collect_host_tensor_names(device_ir, rolled_ids: set[int]) -> list[str]:
+    """Collect all unique host tensor names from _host_tensor calls across all graphs.
+    
+    This pre-scans all FX graphs to identify every tensor that will be referenced
+    via _host_tensor calls, so they can all be registered as function parameters.
+    
+    Args:
+        device_ir: The DeviceIR containing all graphs
+        rolled_ids: Set of graph IDs to skip (rolled reductions)
+    
+    Returns:
+        List of unique host tensor names in order of first occurrence
+    """
+    import helion.language._tracing_ops as hl_tracing_ops
+    
+    host_tensor_names: list[str] = []
+    seen: set[str] = set()
+    
+    for graph_info in device_ir.graphs:
+        if graph_info.graph_id in rolled_ids:
+            continue
+        for node in graph_info.graph.nodes:
+            if node.op == "call_function" and node.target is hl_tracing_ops._host_tensor:
+                name = node.args[0]
+                if name not in seen:
+                    host_tensor_names.append(name)
+                    seen.add(name)
+    
+    return host_tensor_names
+
+
 def generate_mlir(
     bound_kernel: "BoundKernel",
     *,
@@ -97,29 +128,43 @@ def generate_mlir(
             "Multiple nested loops not yet supported."
         )
     
-    # Set up host tensor mappings from kernel args
-    for arg in ctx.kernel_args:
-        if arg.is_tensor and arg.name:
-            ctx.host_tensors[arg.name] = f"%{arg.name}"
+    # Collect ALL host tensor names from _host_tensor calls across ALL graphs
+    # This ensures every tensor referenced via _host_tensor becomes a function parameter
+    # ONLY tensors in this list should be in the function signature
+    all_host_tensor_names = _collect_host_tensor_names(device_ir, rolled_ids)
     
-    # Infer output shape
+    # Build mapping from tensor name to type info
+    kernel_arg_by_name = {arg.name: arg for arg in ctx.kernel_args if arg.is_tensor}
+    
+    # Infer output shape (needed for 'out' parameter type)
     full_shape = _infer_output_shape(ctx)
     
     # Emit module start with tile size attributes
     module_attrs = ctx.get_module_attributes()
     builder.emit_module_start(module_attrs)
     
-    # Build function signature from kernel arguments
-    # Add 'out' parameter explicitly as it's a host tensor
-    func_args = ctx.get_func_signature_args()
-    out_type = format_tensor_type(full_shape, ctx.element_type)
-    func_args.append(("%out", out_type))
+    # Build function signature ONLY from host tensors actually used in Device IR
+    # This ensures parameter names match what the Device IR expects
+    func_args = []
+    for tensor_name in all_host_tensor_names:
+        ssa_name = f"%{tensor_name}"
+        
+        if tensor_name == 'out':
+            # Output tensor - use inferred shape
+            tensor_type = format_tensor_type(full_shape, ctx.element_type)
+        elif tensor_name in kernel_arg_by_name:
+            # This is a kernel arg that's also used in Device IR
+            tensor_type = kernel_arg_by_name[tensor_name].mlir_type or ctx.tensor_type
+        else:
+            # Derived tensor (view) - use dynamic tensor type
+            tensor_type = ctx.tensor_type
+        
+        func_args.append((ssa_name, tensor_type))
+        # Pre-register in host_tensors for later lookup
+        ctx.host_tensors[tensor_name] = ssa_name
     
     # Function returns void (output is via out parameter)
     result_type = None  # void return
-    
-    # Pre-register out in host_tensors
-    ctx.host_tensors["out"] = "%out"
     
     # Emit function start with void return
     builder.emit_func_start(kernel_name, func_args, result_type)
@@ -168,7 +213,8 @@ def generate_mlir(
     visitor.reduction_trip_counts = reduction_trip_counts
     # out is now a function parameter, so pre-register it
     visitor.output_tensor_ssa = "%out"
-    visitor.output_tensor_type = out_type
+    # Get output tensor type from host_tensors registration (stored during func_args construction)
+    visitor.output_tensor_type = format_tensor_type(full_shape, ctx.element_type)
     
     # Emit affine.parallel for grid blocks
     if grid_block_ids and grid_block_ids[0]:

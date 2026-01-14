@@ -638,66 +638,22 @@ class IRVisitor:
         return ssa
     
     def visit_host_tensor(self, node: fx.Node) -> str:
-        """Map host tensor reference to function argument or allocate output."""
-        tensor_name = node.args[0]  # 'x', 'y', 'out'
+        """Map host tensor reference to function argument.
         
-        # Check if this is the output tensor
-        if tensor_name == 'out':
-            # Allocate output tensor
-            if self.output_tensor_ssa is None:
-                # Find first input tensor for alloc_like
-                first_input_ssa = None
-                first_input_type = None
-                for arg in self.ctx.kernel_args:
-                    if arg.is_tensor and arg.name != 'out':
-                        first_input_ssa = f"%{arg.name}"
-                        first_input_type = arg.mlir_type or self.ctx.tensor_type
-                        break
-                
-                # Determine output shape from loop extents
-                from .mlir_builder import format_shape_attr
-                output_shape = [loop.total_extent for loop in self.ctx.outer_loops]
-                while len(output_shape) < 2:
-                    output_shape.append(None)
-                shape_attr = format_shape_attr(output_shape)
-                
-                # Determine output type
-                self.output_tensor_type = format_tensor_type(output_shape, self.ctx.element_type)
-                self.output_tensor_ssa = self.builder.fresh("out")
-                
-                if first_input_ssa:
-                    attrs = format_attr_dict({"shape": shape_attr})
-                    self.builder.emit(
-                        f'{self.output_tensor_ssa} = "helion.alloc_like"({first_input_ssa}){attrs} '
-                        f': ({first_input_type}) -> {self.output_tensor_type}'
-                    )
-                else:
-                    # Fallback: emit alloc without template
-                    attrs = format_attr_dict({"shape": shape_attr})
-                    self.builder.emit(
-                        f'{self.output_tensor_ssa} = "helion.alloc"(){attrs} '
-                        f': () -> {self.output_tensor_type}'
-                    )
-            
-            self.node_values[node.name] = self.output_tensor_ssa
-            self.ctx.host_tensors[tensor_name] = self.output_tensor_ssa
-            return self.output_tensor_ssa
+        All host tensors (both kernel args and derived tensors like views)
+        are pre-registered as function parameters during MLIR generation.
+        This method simply looks them up - no helion.host_ref emission needed.
+        """
+        tensor_name = node.args[0]  # 'x', 'y', 'out', 'q_view', etc.
         
         # Look up in pre-registered host tensors
         ssa = self.ctx.host_tensors.get(tensor_name)
         if ssa is None:
-            # This is a derived/view tensor (like q_view, k_view) - emit host_ref
-            ssa = self.builder.fresh(tensor_name)
-            attrs = format_attr_dict({
-                "name": format_string_attr(tensor_name),
-                "fx_node": format_string_attr(node.name),
-            })
-            self.builder.emit(
-                f'{ssa} = "helion.host_ref"(){attrs} '
-                f': () -> {self.ctx.tensor_type}'
+            raise ValueError(
+                f"Host tensor '{tensor_name}' not found in pre-registered host_tensors. "
+                f"Available: {list(self.ctx.host_tensors.keys())}. "
+                "All _host_tensor calls should map to function parameters."
             )
-            # Register for reuse
-            self.ctx.host_tensors[tensor_name] = ssa
         
         self.node_values[node.name] = ssa
         return ssa
