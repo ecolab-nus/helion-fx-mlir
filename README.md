@@ -1,14 +1,12 @@
 # Helion → MLIR Lowering
 
-This repository hosts an instruction-driven lowering path that translates
-Helion kernels into MLIR by walking Device IR FX graphs node-by-node. Each
-Device IR operation is mapped to a corresponding MLIR operation.
+This repository provides an instruction-driven lowering path that translates
+[Helion](https://github.com/pytorch-labs/helion) kernels into MLIR. It walks Device IR FX graphs node-by-node,
+mapping each operation to corresponding MLIR dialects.
 
 For detailed architecture, FX graph structure, and lowering internals, see [Software Architecture](docs/software_architecture.md).
 
-## MLIR Generation
-
-The main entry point is `generate_mlir()`:
+## Quick Start
 
 ```python
 from helion_fx_mlir import generate_mlir, validate_with_helion_opt
@@ -16,23 +14,61 @@ from helion_fx_mlir import generate_mlir, validate_with_helion_opt
 # Generate MLIR from a bound Helion kernel
 mlir_text = generate_mlir(bound_kernel, kernel_name="matmul")
 
-# Validate with mlir-opt
-result = validate_with_helion_opt(mlir_text)
+# Validate with helion-opt
+result = validate_with_helion_opt(mlir_text, extra_args=["-allow-unregistered-dialect"])
 ```
 
 ## Op Mapping Overview
 
 The system maps operations from two sources:
-1.  **Helion Nodes**: Control flow and memory operations (loops, load, store) are lowered directly by this project.
-2.  **ATen Operations**: Compute operations (e.g., `addmm`, `relu`) are lowered via **torch-mlir** integration.
 
 | Operation Type | Examples | Generated Dialect |
 |----------------|----------|-------------------|
-| **Control Flow** | loops, phi nodes | `affine`, `helion` |
-| **Memory** | load, store, alloc | `tensor`, `helion` |
-| **Compute** | addmm, mul, div | `linalg`, `arith` |
+| **Control Flow** | `_for_loop`, `_phi` | `affine`, `helion` |
+| **Memory** | `load`, `store`, `subscript` | `tensor` (`extract_slice`, `insert_slice`, `expand_shape`) |
+| **Tensor Creation** | `full`, `zeros` | `tensor.empty` + `linalg.fill` |
+| **Compute** | `addmm`, `bmm`, `exp2`, `amax`, ... | `torch.aten.*` (via torch-mlir) |
+| **Symbols** | `_get_symnode` | `loom.get_symbol` |
 
-For a detailed mapping reference, see the [Architecture Documentation](docs/software_architecture.md#op-mapping-reference-generators).
+### Helion-Specific Operations
+
+| Device IR Node | Generated MLIR |
+|----------------|----------------|
+| `_for_loop` | `affine.for` with `iter_args` |
+| `_phi` | `helion.phi` |
+| `load` | `tensor.extract_slice` |
+| `store` | `tensor.insert_slice` |
+| `subscript` | `tensor.extract_slice` / `tensor.expand_shape` |
+| `full` / `zeros` | `tensor.empty` + `linalg.fill` |
+| `_host_tensor` | SSA lookup (function parameters) |
+| `_mask_to` | Pass-through (TODO: boundary checks) |
+
+### ATen Operations
+
+All ATen operations (`aten.*`) are lowered through **torch-mlir** integration, producing `torch.aten.*` dialect ops:
+
+```
+aten.addmm   → torch.aten.addmm
+aten.bmm     → torch.aten.bmm
+aten.exp2    → torch.aten.exp2
+aten.amax    → torch.aten.amax
+aten.sum     → torch.aten.sum.dim_IntList
+...
+```
+
+See [`torch_mlir_helper.py`](src/helion_fx_mlir/torch_mlir_helper.py) for the FxImporter-based integration.
+
+## Package Structure
+
+```
+src/helion_fx_mlir/
+├── __init__.py              # Public API exports
+├── helion_mlir.py           # Entry point: generate_mlir(), validate_with_helion_opt()
+├── ir_visitor.py            # IRVisitor: walks FX graphs, dispatches to visit_* methods
+├── lowering_context.py      # LoweringContext: state (loops, args, SSA mappings)
+├── mlir_builder.py          # MLIRBuilder: text emission, SSA naming, indentation
+└── torch_mlir_helper.py     # torch-mlir integration for ATen ops
+```
 
 ## Building `helion-opt`
 
@@ -43,45 +79,42 @@ cmake -S . -B build
 cmake --build build --target helion-opt
 ```
 
-This produces `build/mlir/helion-opt`. Note that ops like `loom.get_symbol` require 
-using `mlir-opt -allow-unregistered-dialect` until they are registered in the C++ dialect.
+This produces `build/mlir/helion-opt`. Some ops (e.g., `loom.get_symbol`, `torch.aten.*`) require
+`-allow-unregistered-dialect` until they are registered in the C++ dialect.
 
 ## Running Examples
+
+### Matrix Multiplication
 
 ```bash
 python examples/matmul.py
 ```
 
-This prints the Device IR and generated MLIR, then validates with `mlir-opt`.
+Prints Device IR, generated MLIR, and validates with `helion-opt`.
 
-## TODO: Temporary ATen Op Patches
+### Flash Attention
 
-The following ATen operations are currently handled with temporary `helion.aten_op` placeholders in `ir_visitor.py`. These should eventually be replaced with proper linalg lowerings via torch-mlir:
+```bash
+python examples/attn.py
+```
 
-| ATen Op | Status | Notes |
-|---------|--------|-------|
-| `aten.full.default` | ✅ Done | Uses `tensor.empty` + `linalg.fill` |
-| `aten.bmm.default` | ⚠️ Placeholder | Batch matrix multiply |
-| `aten.baddbmm.default` | ⚠️ Placeholder | Batch add batch matrix multiply |
-| `aten.amax.default` | ⚠️ Placeholder | Max along dimension |
-| `aten.maximum.default` | ⚠️ Placeholder | Element-wise max |
-| `aten.mul.Tensor` | ⚠️ Placeholder | Element-wise/scalar multiply |
-| `aten.sub.Tensor` | ⚠️ Placeholder | Element-wise subtract |
-| `aten.add.Tensor` | ⚠️ Placeholder | Element-wise add |
-| `aten.exp2.default` | ⚠️ Placeholder | Element-wise 2^x |
-| `aten.sum.dim_IntList` | ⚠️ Placeholder | Sum along dimensions |
-| `aten.div.Tensor` | ⚠️ Placeholder | Element-wise divide |
+Demonstrates a more complex kernel with 3D tensors, batch matrix operations, and reduction loops.
 
-### Helion-Specific Operations
+## Requirements
 
-| Operation | Status | Notes |
-|-----------|--------|-------|
-| `_mask_to` | ✅ Shortcircuit | Passes through input tensor; boundary checks ignored for now |
-| `subscript` | ✅ `helion.subscript` | Emits placeholder op; proper slice handling TODO |
+- Python 3.11+
+- PyTorch with Helion (`helion` package)
+- torch-mlir (for ATen operation lowering)
+- LLVM/MLIR (for building `helion-opt`)
 
-### Long-term Solution
-These temporary patches should be replaced by either:
-1. Proper torch-mlir integration once it supports dynamic FX node shapes
-2. Custom linalg lowerings registered via `@register_lowering` decorator
-3. Full implementation of `_mask_to` boundary checking logic
-4. Proper slice/index operand handling in `helion.subscript`
+See `requirements.txt` for Python dependencies.
+
+## Current Limitations
+
+- **Masking**: `_mask_to` passes through tensors without boundary checks
+- **Dynamic Shapes**: Full dynamic shape support is work-in-progress
+- **torch Dialect**: `helion-opt` does not register torch dialect; use `-allow-unregistered-dialect`
+
+## License
+
+MIT License. See [LICENSE](LICENSE).
