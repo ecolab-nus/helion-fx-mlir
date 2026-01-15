@@ -257,28 +257,6 @@ def generate_mlir(
     
     return builder.build()
 
-
-# def _infer_output_shape(ctx: LoweringContext) -> list[int | None]:
-#     """Infer output shape from outer loop extents.
-    
-#     The outer (parallel) loops define the output tensor dimensions.
-#     For matmul: [tile_m, tile_n] -> [M, N]
-#     """
-#     shape = []
-#     for loop in ctx.outer_loops:
-#         extent = loop.total_extent
-#         if isinstance(extent, int):
-#             shape.append(extent)
-#         else:
-#             shape.append(None)  # Dynamic dimension
-    
-#     # Ensure we have at least 2 dimensions for typical 2D output tensors
-#     while len(shape) < 2:
-#         shape.append(None)
-    
-#     return shape
-
-
 # -----------------------------------------------------------------------------
 # Validation utility
 # -----------------------------------------------------------------------------
