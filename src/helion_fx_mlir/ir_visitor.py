@@ -65,6 +65,9 @@ class IRVisitor:
         # FX node name -> MLIR SSA value
         self.node_values: dict[str, str] = {}
         
+        # FX node name -> MLIR type string (e.g., "tensor<?x?xf32>")
+        self.node_types: dict[str, str] = {}
+        
         # Graph ID -> GraphInfo for nested graphs (ForLoopGraphInfo)
         self.graphs: dict[int, "GraphInfo"] = {}
         
@@ -119,6 +122,13 @@ class IRVisitor:
         # For now, just create a placeholder SSA value
         ssa = f"%{node.name}"
         self.node_values[node.name] = ssa
+        
+        # Register type from kernel args if available
+        for arg in self.ctx.kernel_args:
+            if arg.name == node.name and arg.mlir_type:
+                self.node_types[node.name] = arg.mlir_type
+                break
+                
         return ssa
     
     def visit_call_function(self, node: fx.Node) -> str | None:
@@ -313,6 +323,7 @@ class IRVisitor:
         )
         
         self.node_values[node.name] = filled_ssa
+        self.node_types[node.name] = tensor_type
         
         # Track initial accumulator for phi
         self.initial_acc_ssa[node.name] = filled_ssa
@@ -386,6 +397,7 @@ class IRVisitor:
         )
         
         self.node_values[node.name] = filled_ssa
+        self.node_types[node.name] = tensor_type
         
         # Track initial accumulator for phi
         self.initial_acc_ssa[node.name] = filled_ssa
@@ -449,9 +461,15 @@ class IRVisitor:
             readonly_args_info = []
             iter_args_info = all_args_info
         
-        # Determine tensor type for iter_args
-        tensor_type = self.ctx.tensor_type
-
+        # Determine tensor type for iter_args from their initial values
+        iter_args_types = []
+        for name, ssa, fx_name in iter_args_info:
+            if fx_name and fx_name in self.node_types:
+                iter_args_types.append(self.node_types[fx_name])
+            else:
+                # Fallback to f32 dynamic tensor if type is unknown
+                # Use ctx.element_type for element type guess if possible
+                iter_args_types.append(f"tensor<?x?xf32>")
         
         # Emit affine.for
         iv = f"%iv_block{block_id}"
@@ -459,12 +477,12 @@ class IRVisitor:
         
         # Build iter_args string
         iter_args_parts = []
-        for name, ssa, _ in iter_args_info:
+        for (name, ssa, _), type_str in zip(iter_args_info, iter_args_types):
             iter_args_parts.append(f"%{name} = {ssa}")
         iter_args_str = ", ".join(iter_args_parts)
         
         # Result types
-        result_types = ", ".join([tensor_type] * len(iter_args_info))
+        result_types = ", ".join(iter_args_types)
         
         # For multi-value results, use :N syntax (e.g., %result:3 = ...)
         num_results = len(iter_args_info)
@@ -521,12 +539,13 @@ class IRVisitor:
         if isinstance(self.current_loop_result, list) and len(self.current_loop_result) > 1:
             # Multiple yield values
             yield_values = ", ".join(self.current_loop_result)
-            yield_types = ", ".join([tensor_type] * len(self.current_loop_result))
+            yield_types = ", ".join(iter_args_types)
             self.builder.emit(f'affine.yield {yield_values} : {yield_types}')
         else:
             # Single yield value (backward compatible)
             yield_value = self.current_loop_result[0] if isinstance(self.current_loop_result, list) else (self.current_loop_result or f"%{iter_args_info[0][0]}")
-            self.builder.emit(f'affine.yield {yield_value} : {tensor_type}')
+            yield_type = iter_args_types[0] if iter_args_types else f"tensor<?x?xf32>"
+            self.builder.emit(f'affine.yield {yield_value} : {yield_type}')
         
         self.builder.pop()
         self.builder.emit("}")
@@ -564,7 +583,9 @@ class IRVisitor:
         rhs_ssa = self.node_values.get(rhs.name, f"%{rhs.name}") if isinstance(rhs, fx.Node) else str(rhs)
         
         ssa = self.builder.fresh("phi")
-        tensor_type = self.ctx.tensor_type
+        
+        # Infer type from LHS
+        tensor_type = self._get_tensor_type(lhs) if isinstance(lhs, fx.Node) else self.ctx.tensor_type
         
         attrs = format_attr_dict({"fx_node": format_string_attr(node.name)})
         
@@ -574,6 +595,7 @@ class IRVisitor:
         )
         
         self.node_values[node.name] = ssa
+        self.node_types[node.name] = tensor_type
         return ssa
     
     def visit_new_var(self, node: fx.Node) -> str:
@@ -585,6 +607,8 @@ class IRVisitor:
             ssa = str(arg)
         
         self.node_values[node.name] = ssa
+        if isinstance(arg, fx.Node):
+            self.node_types[node.name] = self._get_tensor_type(arg)
         return ssa
     
     def visit_host_tensor(self, node: fx.Node) -> str:
@@ -633,7 +657,7 @@ class IRVisitor:
             tensor_ssa = str(tensor_node)
         
         # Get the tensor type
-        tensor_type = self._get_tensor_type(tensor_node) if isinstance(tensor_node, fx.Node) else self.ctx.tensor_type
+        tensor_type = self._get_tensor_type(tensor_node) if isinstance(tensor_node, fx.Node) else f"tensor<?x?xf32>"
         
         # Emit tensor.dim to get the dimension size
         dim_idx_ssa = self.builder.fresh("dim_idx")
@@ -738,7 +762,32 @@ class IRVisitor:
                 sizes_ssa.append(size_ssa)
         
         result = self.builder.fresh("slice")
-        result_type = self.ctx.tensor_type
+        
+        # Infer result type - same rank as source tensor, same element type
+        # format: tensor<?x?xf32>
+        if 'tensor<' in tensor_type and '>' in tensor_type:
+            # Extract content between <>
+            content = tensor_type[tensor_type.find('<')+1 : tensor_type.rfind('>')]
+            if 'x' in content:
+                parts = content.split('x')
+                dtype_str = parts[-1]
+                rank = len(parts) - 1
+            else:
+                # 0-D or 1-D with no dims?
+                rank = 0
+                dtype_str = content
+            
+            # Construct dynamic type with same rank
+            if rank > 0:
+                dim_wildcards = "x".join(["?"] * rank)
+                result_type = f"tensor<{dim_wildcards}x{dtype_str}>"
+            else:
+                result_type = f"tensor<{dtype_str}>"
+        else:
+            # Fallback
+            result_type = self.ctx.tensor_type
+            
+        self.node_types[node.name] = result_type
         
         # Format as tensor.extract_slice
         rank = len(indices)
@@ -771,10 +820,10 @@ class IRVisitor:
         value = node.args[2]
         
         tensor_ssa = self.node_values.get(tensor_node.name, f"%{tensor_node.name}")
-        tensor_type = self.ctx.tensor_type  # Use dynamic type for destination
+        tensor_type = self._get_tensor_type(tensor_node)  # Use dynamic type for destination
         
         value_ssa = self.node_values.get(value.name, f"%{value.name}") if isinstance(value, fx.Node) else str(value)
-        value_type = self.ctx.tensor_type
+        value_type = self._get_tensor_type(value) if isinstance(value, fx.Node) else f"tensor<?x?xf32>"
         
         # Collect offset and size SSA values for each dimension
         offsets_ssa = []
@@ -1087,8 +1136,6 @@ class IRVisitor:
             elif arg is not None:
                 operand_ssas.append(str(arg))
         
-        tensor_type = self.ctx.tensor_type
-        
         # -------------------------------------------------------------------------
         # Use torch-mlir to generate torch dialect MLIR for all ATen operations
         # -------------------------------------------------------------------------
@@ -1141,10 +1188,22 @@ class IRVisitor:
         else:
             name = str(tensor_node)
         
+        # Look up in registered node types
+        if name in self.node_types:
+            return self.node_types[name]
+            
         # Look up in kernel args
         for arg in self.ctx.kernel_args:
             if arg.name == name and arg.mlir_type:
                 return arg.mlir_type
         
-        # Default to dynamic tensor type
-        return self.ctx.tensor_type
+        # Look up in loop iter args (if it's a placeholder in a loop)
+        if name in self.loop_iter_args:
+            # We might not have the type easily available for loop args unless we track them
+            # For now, try to find the corresponding acc_iter info if possible,
+            # or rely on the caller to handle this case.
+            pass
+
+        # Fallback to f32 if we can't determine type (temporary for migration)
+        # But generally we should raise an error if type is unknown
+        return f"tensor<?x?xf32>"

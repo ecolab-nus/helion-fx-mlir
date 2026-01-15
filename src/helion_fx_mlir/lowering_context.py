@@ -66,21 +66,15 @@ class LoweringContext:
         self,
         builder: MLIRBuilder,
         bound_kernel: Any,
-        element_type: str = "f32",
-        tensor_type: str = "tensor<?x?xf32>",
     ):
         """Initialize a LoweringContext.
         
         Args:
             builder: MLIRBuilder for text emission
             bound_kernel: The bound Helion kernel
-            element_type: MLIR element type (e.g., "f32")
-            tensor_type: Default tensor type string
         """
         self.builder = builder
         self.bound_kernel = bound_kernel
-        self.element_type = element_type
-        self.tensor_type = tensor_type
         
         # Mutable state that gets populated during lowering
         self.loop_extents: dict[str, int] = {}
@@ -150,22 +144,17 @@ class LoweringContext:
         builder = MLIRBuilder()
         fake_args = bound_kernel.fake_args
         
-        # Extract kernel args to determine element type
+        # Extract kernel args
         kernel_args = _extract_kernel_args(bound_kernel)
         tensor_args = [arg for arg in kernel_args if arg.is_tensor]
         
-        # Determine element type from first tensor argument, fallback to f32
-        element_type = "f32"
-        if tensor_args:
-            first_tensor = fake_args[tensor_args[0].index]
-            element_type = torch_dtype_to_mlir_element_type(first_tensor.dtype)
+        if not tensor_args:
+            raise ValueError("No tensor arguments found")
         
         # Create context
         ctx = cls(
             builder=builder,
             bound_kernel=bound_kernel,
-            element_type=element_type,
-            tensor_type="",  # Will be set after _build_loop_info
         )
         
         # Pre-populate kernel_args cache since we already computed it
@@ -174,16 +163,15 @@ class LoweringContext:
         # Build loop information - this populates loop_extents
         ctx._build_loop_info()
         
-        # Keep tensor_type dynamic for intermediate tile operations
-        ctx.tensor_type = format_tensor_type([None, None], element_type)
-        
-        # Update kernel_args with actual shapes from fake_args
+        # Update kernel_args with actual shapes and types from fake_args
         for arg in ctx.kernel_args:
             if arg.is_tensor and arg.index < len(fake_args):
                 tensor = fake_args[arg.index]
                 # Use actual tensor shape
                 arg.shape = [int(s) if not isinstance(s, torch.SymInt) else None 
                              for s in tensor.shape]
+                # Derive element type from THIS tensor's dtype
+                element_type = torch_dtype_to_mlir_element_type(tensor.dtype)
                 arg.mlir_type = format_tensor_type(arg.shape, element_type)
         
         return ctx

@@ -150,13 +150,13 @@ def generate_mlir(
             # Output tensor - use dynamic type like other _host_tensor parameters
             # The 'out' tensor comes from _host_tensor('out') and should be treated
             # the same as input tensors (dynamic shape)
-            tensor_type = ctx.tensor_type
+            tensor_type = f"tensor<?x?xf32>"
         elif tensor_name in kernel_arg_by_name:
             # This is a kernel arg that's also used in Device IR
-            tensor_type = kernel_arg_by_name[tensor_name].mlir_type or ctx.tensor_type
+            tensor_type = kernel_arg_by_name[tensor_name].mlir_type or f"tensor<?x?xf32>"
         else:
             # Derived tensor (view) - use dynamic tensor type
-            tensor_type = ctx.tensor_type
+            tensor_type = f"tensor<?x?xf32>"
         
         func_args.append((ssa_name, tensor_type))
         # Pre-register in host_tensors for later lookup
