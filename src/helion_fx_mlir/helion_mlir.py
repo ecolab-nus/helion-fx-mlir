@@ -227,27 +227,15 @@ def generate_mlir(
             # Block size SSA must exist since we emitted all of them above
             tile_size_ssa = block_size_ssa[block_id]
             
-            # Generate calculation: (total_extent + tile_size - 1) // tile_size
+            # Generate calculation: ceil(total_extent / tile_size)
             # Since total_extent is constant here, we can emit it
             
             # %total = arith.constant ...
             total_ssa = builder.fresh("total_extent")
             builder.emit(f'{total_ssa} = arith.constant {total_extent} : index')
             
-            # %c1 = arith.constant 1
-            c1_ssa = builder.fresh("c1")
-            builder.emit(f'{c1_ssa} = arith.constant 1 : index')
-            
-            # %t_minus_1 = sub total, 1
-            t_minus_1 = builder.fresh("t_minus_1")
-            builder.emit(f'{t_minus_1} = arith.subi {total_ssa}, {c1_ssa} : index')
-            
-            # %num = add t_minus_1, tile_size
-            num_ssa = builder.fresh("numerator")
-            builder.emit(f'{num_ssa} = arith.addi {t_minus_1}, {tile_size_ssa} : index')
-            
-            # %trip_count = divui num, tile_size
-            builder.emit(f'{trip_count_ssa} = arith.divui {num_ssa}, {tile_size_ssa} : index')
+            # %trip_count = ceildivui total, tile_size
+            builder.emit(f'{trip_count_ssa} = arith.ceildivui {total_ssa}, {tile_size_ssa} : index')
         
         # Store in visitor for use in visit_for_loop
         reduction_trip_counts[block_id] = trip_count_ssa
