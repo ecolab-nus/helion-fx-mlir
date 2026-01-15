@@ -610,39 +610,40 @@ class IRVisitor:
 
     
     def visit_sym_size(self, node: fx.Node) -> str:
-        """Handle aten.sym_size.int - maps to outer loop tile index.
+        """Handle aten.sym_size.int - get dimension size from a tensor.
         
-        In ForLoopGraphInfo, sym_size_int is used to get the tile index
-        from the outer loops. For example:
-        - sym_size_int(arg0_1, 0) -> %iv_block0 (first outer loop IV)
-        - sym_size_int(arg0_1, 1) -> %iv_block1 (second outer loop IV)
+        In ForLoopGraphInfo, sym_size_int is used to get the dimension size
+        of a tensor argument. For example:
+        - sym_size_int(arg0_1, 0) -> tensor.dim %tensor, 0 (dimension 0 of the tensor)
+        - sym_size_int(arg0_1, 1) -> tensor.dim %tensor, 1 (dimension 1 of the tensor)
+        
+        The tensor_node (e.g., arg0_1) refers to a placeholder that corresponds to
+        an argument passed to the ForLoopGraphInfo from the RootGraphInfo's _for_loop call.
         """
         tensor_node = node.args[0]
         dim = node.args[1]
         
-        # Map dimension to outer loop IV
-        # dim 0 -> block 0 -> %iv_block0
-        # dim 1 -> block 1 -> %iv_block1
-        if dim < len(self.ctx.grid_loops):
-            block_id = self.ctx.grid_loops[dim].block_id
-            iv_name = f"%iv_block{block_id}"
-            self.node_values[node.name] = iv_name
-            return iv_name
+        # Get the tensor SSA value
+        # First, try to resolve from loop_iter_args (for read-only args passed to for_loop)
+        if isinstance(tensor_node, fx.Node):
+            tensor_ssa = self.loop_iter_args.get(tensor_node.name)
+            if tensor_ssa is None:
+                tensor_ssa = self.node_values.get(tensor_node.name, f"%{tensor_node.name}")
+        else:
+            tensor_ssa = str(tensor_node)
         
-        # Fallback for reduction dimension or other cases
-        # Look up if this corresponds to a reduction loop
-        if dim < len(self.ctx.grid_loops) + len(self.ctx.inner_loops):
-            idx = dim - len(self.ctx.grid_loops)
-            if idx < len(self.ctx.inner_loops):
-                block_id = self.ctx.inner_loops[idx].block_id
-                iv_name = f"%iv_block{block_id}"
-                self.node_values[node.name] = iv_name
-                return iv_name
+        # Get the tensor type
+        tensor_type = self._get_tensor_type(tensor_node) if isinstance(tensor_node, fx.Node) else self.ctx.tensor_type
         
-        # Last fallback: just use the dim as block id
-        iv_name = f"%iv_block{dim}"
-        self.node_values[node.name] = iv_name
-        return iv_name
+        # Emit tensor.dim to get the dimension size
+        dim_idx_ssa = self.builder.fresh("dim_idx")
+        self.builder.emit(f'{dim_idx_ssa} = arith.constant {dim} : index')
+        
+        result_ssa = self.builder.fresh("dim_size")
+        self.builder.emit(f'{result_ssa} = tensor.dim {tensor_ssa}, {dim_idx_ssa} : {tensor_type}')
+        
+        self.node_values[node.name] = result_ssa
+        return result_ssa
     
     def visit_load(self, node: fx.Node) -> str:
         """Generate tensor.extract_slice for tile loading.

@@ -214,7 +214,7 @@ Helion compiles kernels into an FX-based Device IR containing multiple graphs:
 │ 5. OUTPUT: MLIR Text                                                │
 │    - Dialects: affine, tensor, linalg, arith, torch, helion, loom   │
 └─────────────────────────────────────────────────────────────────────┘
----
+```
 
 ## LoweringContext and IRVisitor Data Flow
 
@@ -364,9 +364,9 @@ In addition to using `LoweringContext`, `IRVisitor` maintains its own transient 
 
 1. FX node: `call_function(aten.sym_size.int, (tensor_node, 0))`
 2. IRVisitor calls `visit_sym_size(node)` with `dim = 0`
-3. Checks `len(self.ctx.grid_loops)` to see if dimension is within outer loops
-4. Gets `block_id = self.ctx.grid_loops[0].block_id` (e.g., `0`)
-5. Returns `iv_name = "%iv_block0"` as the SSA value
+3. Resolves tensor SSA from `loop_iter_args` or `node_values`
+4. Emits `tensor.dim %tensor_ssa, %dim_idx : tensor_type` to get the dimension size
+5. Returns the dimension size SSA value
 6. Stores in `self.node_values` for downstream reference
 
 ---
