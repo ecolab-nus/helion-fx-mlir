@@ -81,9 +81,7 @@ def _collect_host_tensor_names(device_ir, rolled_ids: set[int]) -> list[str]:
 
 
 def generate_mlir(
-    bound_kernel: "BoundKernel",
-    *,
-    kernel_name: str | None = None,
+    bound_kernel: "BoundKernel"
 ) -> str:
     """Generate MLIR by walking Device IR instruction-by-instruction.
     
@@ -104,9 +102,6 @@ def generate_mlir(
     ctx = LoweringContext(bound_kernel)
     builder = ctx.builder
     device_ir = bound_kernel.host_function.device_ir
-    
-    # Use provided name or derive from kernel
-    actual_kernel_name = kernel_name if kernel_name else ctx.kernel_name
     
     # Find root and for-loop graphs
     root_graph = None
@@ -172,7 +167,7 @@ def generate_mlir(
     result_type = None  # void return
     
     # Emit function start with void return
-    builder.emit_func_start(actual_kernel_name, func_args, result_type)
+    builder.emit_func_start(ctx.kernel_name, func_args, result_type)
     
     # Create visitor and register all graphs in context
     visitor = IRVisitor(ctx)

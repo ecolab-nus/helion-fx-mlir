@@ -81,7 +81,7 @@ def main() -> None:
         g.graph.print_tabular()
     print("\n")
 
-    mlir_text = generate_mlir(bound, kernel_name="attention")
+    mlir_text = generate_mlir(bound)
     print("=== MLIR Dump ===")
     print(mlir_text)
     

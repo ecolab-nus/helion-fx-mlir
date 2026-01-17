@@ -161,8 +161,7 @@ def main() -> None:
     print("\n")
 
     mlir_text = generate_mlir(
-        bound_kernel,
-        kernel_name="matmul",
+        bound_kernel
     )
     print("=== MLIR Dump ===")
     print(mlir_text)
