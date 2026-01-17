@@ -42,11 +42,10 @@ if TYPE_CHECKING:
     from helion._compiler.device_ir import RootGraphInfo, ForLoopGraphInfo
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-HELION_OPT_CANDIDATES = [
-    REPO_ROOT / "build" / "mlir" / "helion-opt",
-    REPO_ROOT / "build" / "bin" / "helion-opt",
-    Path("/mnt/fast/llvm-mlir/bin/helion-opt"),
+MLIR_OPT_CANDIDATES = [
     Path("/mnt/fast/llvm-mlir/bin/mlir-opt"),
+    Path("/usr/bin/mlir-opt"),
+    Path("/usr/local/bin/mlir-opt"),
 ]
 
 
@@ -303,14 +302,17 @@ def generate_mlir(
 # -----------------------------------------------------------------------------
 
 
-def validate_with_helion_opt(
+def validate_with_mlir_opt(
     mlir_text: str,
     *,
     opt_path: str | Path | None = None,
     extra_args: Iterable[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run `helion-opt` (falling back to `mlir-opt`) to confirm the emitted IR parses."""
-    tool_candidates: Iterable[Path] = HELION_OPT_CANDIDATES if opt_path is None else [Path(opt_path)]
+    """Run `mlir-opt` to confirm the emitted IR parses.
+    
+    Uses -allow-unregistered-dialect to allow loom.* and torch.* operations.
+    """
+    tool_candidates: Iterable[Path] = MLIR_OPT_CANDIDATES if opt_path is None else [Path(opt_path)]
     
     tool: Path | None = None
     for candidate in tool_candidates:
@@ -320,13 +322,11 @@ def validate_with_helion_opt(
     
     if tool is None:
         raise FileNotFoundError(
-            "Unable to locate `helion-opt` or `mlir-opt`. "
-            "Pass `mlir_opt_path` explicitly once the project is built."
+            "Unable to locate `mlir-opt`. "
+            "Install LLVM/MLIR or pass `opt_path` explicitly."
         )
     
-    args = [str(tool)]
-    if tool.name == "mlir-opt":
-        args.append("-allow-unregistered-dialect")
+    args = [str(tool), "-allow-unregistered-dialect"]
     if extra_args:
         args.extend(extra_args)
     

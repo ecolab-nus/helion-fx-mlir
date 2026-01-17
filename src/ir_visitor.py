@@ -569,37 +569,59 @@ class IRVisitor:
 
     
     def visit_phi(self, node: fx.Node) -> str:
-        """Generate helion.phi for control flow merge."""
-        lhs = node.args[0]
-        rhs = node.args[1]
+        """Handle phi nodes for loop-carried value merging.
         
-        # lhs is the initial value (before the loop), rhs is the loop result
-        # Use the tracked initial accumulator for lhs
-        if isinstance(lhs, fx.Node):
-            lhs_ssa = self.ctx.initial_acc_ssa.get(lhs.name)
-            if lhs_ssa is None:
-                lhs_ssa = self.ctx.node_values.get(lhs.name, f"%{lhs.name}")
-        else:
-            lhs_ssa = str(lhs)
+        For Helion Device IR, _phi merges the initial value with the loop result.
+        Since MLIR's affine.for already handles iter_args merge semantics,
+        we simply pass through the loop result SSA.
         
-        # rhs is the loop result (getitem on _for_loop)
-        rhs_ssa = self.ctx.node_values.get(rhs.name, f"%{rhs.name}") if isinstance(rhs, fx.Node) else str(rhs)
+        Pattern detected:
+        - lhs: initial accumulator (e.g., from hl.full)
+        - rhs: getitem of _for_loop result
         
-        ssa = self.builder.fresh("phi")
+        If this pattern is detected, we just use the loop result SSA.
+        Otherwise, raise an error (unsupported phi pattern).
+        """
+        import helion.language._tracing_ops as hl_tracing_ops
+        import operator
         
-        # Infer type from LHS
-        tensor_type = self._get_tensor_type(lhs) if isinstance(lhs, fx.Node) else self.ctx.tensor_type
+        lhs = node.args[0]  # Initial value
+        rhs = node.args[1]  # Loop result (getitem)
         
-        attrs = format_attr_dict({"fx_node": format_string_attr(node.name)})
+        # Check if this is a loop merge pattern
+        is_loop_merge = False
+        loop_result_ssa = None
         
-        self.builder.emit(
-            f'{ssa} = "helion.phi"({lhs_ssa}, {rhs_ssa}){attrs} '
-            f': ({tensor_type}, {tensor_type}) -> {tensor_type}'
+        if isinstance(rhs, fx.Node):
+            # Check if rhs is a getitem on _for_loop
+            if rhs.target is operator.getitem:
+                source = rhs.args[0]
+                if isinstance(source, fx.Node) and source.target is hl_tracing_ops._for_loop:
+                    # This is a getitem(_for_loop, index) - classic loop merge pattern
+                    is_loop_merge = True
+                    loop_result_ssa = self.ctx.node_values.get(rhs.name)
+                    
+                    # Verify lhs is in the _for_loop's args (iter_args)
+                    for_loop_args = source.args[3] if len(source.args) > 3 else []
+                    if isinstance(lhs, fx.Node) and lhs in for_loop_args:
+                        # Confirmed: lhs is an iter_arg of the loop
+                        pass
+                    # Even if not in args, treat as loop merge for now
+        
+        if is_loop_merge and loop_result_ssa is not None:
+            # No helion.phi needed - MLIR's affine.for handles the merge
+            # Just pass through the loop result
+            self.ctx.node_values[node.name] = loop_result_ssa
+            if isinstance(rhs, fx.Node):
+                self.ctx.node_types[node.name] = self._get_tensor_type(rhs)
+            return loop_result_ssa
+        
+        # Unsupported phi pattern - raise error as requested
+        raise ValueError(
+            f"Unsupported phi pattern in {node.name}: "
+            f"lhs={lhs}, rhs={rhs}. "
+            "Only loop-carried value merging (_phi(acc, getitem(_for_loop, i))) is supported."
         )
-        
-        self.ctx.node_values[node.name] = ssa
-        self.ctx.node_types[node.name] = tensor_type
-        return ssa
     
     def visit_new_var(self, node: fx.Node) -> str:
         """Pass through _new_var nodes (just forward the input value)."""

@@ -5,7 +5,7 @@ This package provides infrastructure for converting Helion kernels
 
 Main entry points:
 - generate_mlir: Generate MLIR from a bound Helion kernel
-- validate_with_helion_opt: Validate emitted MLIR with helion-opt or mlir-opt
+- validate_with_mlir_opt: Validate emitted MLIR with mlir-opt
 
 Architecture:
 - IRVisitor: Walks FX graphs instruction-by-instruction
@@ -14,7 +14,7 @@ Architecture:
 """
 
 # Main entry points
-from .helion_mlir import generate_mlir, validate_with_helion_opt
+from .helion_mlir import generate_mlir, validate_with_mlir_opt
 
 # IR visitor for custom extensions
 from .ir_visitor import IRVisitor
@@ -45,7 +45,7 @@ from .torch_mlir_helper import (
 __all__ = [
     # Main entry points
     "generate_mlir",
-    "validate_with_helion_opt",
+    "validate_with_mlir_opt",
     # IR visitor
     "IRVisitor",
     # Builder and utilities
