@@ -26,7 +26,7 @@ import helion.language as hl
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-# Make sure the repo-local src/ package layout is importable when the example is
+# Make sure the repo-local src/ package is importable when the example is
 # executed directly.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC_ROOT = _REPO_ROOT / "src"
