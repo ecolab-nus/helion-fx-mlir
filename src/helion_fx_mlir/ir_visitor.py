@@ -224,18 +224,11 @@ class IRVisitor:
     def visit_get_symnode(self, node: fx.Node) -> str:
         """Look up pre-emitted SSA for symnode references.
         
-        Resolution order:
-        1. Check if sympy expression has concrete value in shape_env.var_to_val
-           -> emit arith.constant
-        2. Look up origin in HostFunction.expr_to_origin:
-           - TensorSizeOrigin -> ctx.tensor_dim_ssa[(arg_name, dim)]
-           - BlockSizeOrigin -> ctx.block_size_ssa[block_id]
+        Resolution strategy based on Origin type:
+        1. BlockSizeOrigin -> Use pre-emitted ctx.block_size_ssa[block_id]
+        2. Other origins -> Use shape_env.var_to_val for concrete value -> arith.constant
         """
-        from helion._compiler.variable_origin import (
-            TensorSizeOrigin,
-            BlockSizeOrigin,
-            ArgumentOrigin,
-        )
+        from helion._compiler.variable_origin import BlockSizeOrigin
         
         # Get sympy expression from node metadata
         sym_val = node.meta.get("val")
@@ -244,49 +237,34 @@ class IRVisitor:
         
         sym = sym_val._sympy_()
         
-        # 1. Check if the symbol has a concrete value in shape_env
+        # Look up origin info from the host_function
+        host_function = self.ctx.bound_kernel.host_function
+        origin_info = host_function.expr_to_origin.get(sym)
+        origin = origin_info.origin if origin_info else None
+        
+        # 1. BlockSizeOrigin -> use pre-emitted block_size_ssa
+        if isinstance(origin, BlockSizeOrigin):
+            block_id = origin.block_id
+            ssa = self.ctx.block_size_ssa.get(block_id)
+            if ssa is None:
+                raise ValueError(f"No block_size_ssa for block_id={block_id}")
+            self.ctx.node_values[node.name] = ssa
+            return ssa
+        
+        # 2. Other origins -> use shape_env for concrete value
         shape_env = self.ctx.bound_kernel.env.shape_env
         if sym in shape_env.var_to_val:
-            # Symbol has concrete value - emit arith.constant
             concrete_val = int(shape_env.var_to_val[sym])
             ssa = self.builder.fresh(node.name.replace(".", "_"))
             self.builder.emit(f'{ssa} = arith.constant {concrete_val} : index')
             self.ctx.node_values[node.name] = ssa
             return ssa
         
-        # 2. Look up origin info from the host_function
-        host_function = self.ctx.bound_kernel.host_function
-        origin_info = host_function.expr_to_origin.get(sym)
-        
-        if origin_info is None:
-            raise ValueError(f"No origin found for symbol {sym}")
-        
-        origin = origin_info.origin
-        
-        # Handle TensorSizeOrigin
-        if isinstance(origin, TensorSizeOrigin):
-            # Get argument name from the wrapped ArgumentOrigin
-            if isinstance(origin.value, ArgumentOrigin):
-                arg_name = origin.value.name
-            else:
-                arg_name = origin.value.suggest_var_name()
-            dim = origin.key
-            ssa = self.ctx.tensor_dim_ssa.get((arg_name, dim))
-            if ssa is None:
-                raise ValueError(f"No tensor_dim_ssa for ({arg_name}, {dim})")
-        
-        # Handle BlockSizeOrigin
-        elif isinstance(origin, BlockSizeOrigin):
-            block_id = origin.block_id
-            ssa = self.ctx.block_size_ssa.get(block_id)
-            if ssa is None:
-                raise ValueError(f"No block_size_ssa for block_id={block_id}")
-        
-        else:
-            raise ValueError(f"Unrecognized origin type: {type(origin)} for {node.name}")
-        
-        self.ctx.node_values[node.name] = ssa
-        return ssa
+        # Fallback: no resolution found
+        raise ValueError(
+            f"Cannot resolve symbol {sym} for {node.name}. "
+            f"Origin: {origin}, not in shape_env.var_to_val"
+        )
     
     def visit_full(self, node: fx.Node) -> str:
         """Generate tensor.empty + linalg.fill for tensor initialization.
@@ -698,19 +676,44 @@ class IRVisitor:
         """Generate tensor.extract_slice for tile loading.
         
         Replaces the custom helion.load with standard MLIR tensor.extract_slice.
-        The extract_slice operation takes offsets, sizes, and strides to
-        extract a sub-tensor from the source.
-        
-        For tiled access like x[tile_m, tile_k]:
-        - offsets come from loop IVs multiplied by tile sizes
-        - sizes come from the tile dimensions (block sizes)
-        - strides are 1 for contiguous access
+        The tile sizes come from the load node's FakeTensor metadata (node.meta['val'].size()),
+        and each dimension's SymInt origin is used to look up the pre-emitted SSA.
         """
+        from helion._compiler.variable_origin import BlockSizeOrigin
+        
         tensor_node = node.args[0]
         indices = node.args[1]  # [sym_size_int, block_size_2] or [block_size_0, block_size_1, slice(...)]
         
         tensor_ssa = self.ctx.node_values.get(tensor_node.name, f"%{tensor_node.name}")
         tensor_type = self._get_tensor_type(tensor_node)
+        
+        # Get output FakeTensor shape from node metadata to determine tile sizes
+        output_fake_tensor = node.meta.get("val")
+        host_function = self.ctx.bound_kernel.host_function
+        shape_env = self.ctx.bound_kernel.env.shape_env
+        
+        # Helper: resolve a SymInt to SSA using Origin lookup
+        def resolve_symint_to_ssa(sym_int, dim_hint: int) -> str:
+            """Resolve a SymInt to its SSA value using Origin-based lookup."""
+            sym = sym_int._sympy_()
+            origin_info = host_function.expr_to_origin.get(sym)
+            origin = origin_info.origin if origin_info else None
+            
+            # BlockSizeOrigin -> use pre-emitted block_size_ssa
+            if isinstance(origin, BlockSizeOrigin):
+                block_id = origin.block_id
+                ssa = self.ctx.block_size_ssa.get(block_id)
+                if ssa is not None:
+                    return ssa
+            
+            # Other origins -> use shape_env for concrete value
+            if sym in shape_env.var_to_val:
+                concrete_val = int(shape_env.var_to_val[sym])
+                ssa = self.builder.fresh(f"size_dim{dim_hint}")
+                self.builder.emit(f'{ssa} = arith.constant {concrete_val} : index')
+                return ssa
+            
+            raise ValueError(f"Cannot resolve SymInt {sym} for dimension {dim_hint}")
         
         # Collect offset and size SSA values for each dimension
         offsets_ssa = []
@@ -730,25 +733,33 @@ class IRVisitor:
                 self.builder.emit(f'{dim_ssa} = tensor.dim {tensor_ssa}, {dim_idx_ssa} : {tensor_type}')
                 sizes_ssa.append(dim_ssa)
             elif isinstance(idx, fx.Node):
-                # Get the SSA value for this index
+                # Get the SSA value for this index (offset)
                 idx_ssa = self.ctx.node_values.get(idx.name, f"%{idx.name}")
                 
                 # Determine if this is a loop IV (sym_size_int) or a block size
                 if 'sym_size' in idx.name:
-                    # sym_size_int represents the tile index within the iteration
-                    # The offset is: loop_iv * block_size
-                    # For now, use loop IV directly as it's already scaled
+                    # sym_size_int represents an offset derived from tensor.dim
+                    # Use it directly as the offset
                     offsets_ssa.append(idx_ssa)
                     
-                    # Size needs to come from block_size - look for corresponding block_size
-                    # For now, emit a symbolic size lookup
-                    size_ssa = self.builder.fresh("tile_size")
-                    self.builder.emit(f'{size_ssa} = "loom.get_symbol"() {{name = "tile_size_{i}"}} : () -> index')
-                    sizes_ssa.append(size_ssa)
+                    # Size comes from the output FakeTensor's shape for this dimension
+                    if output_fake_tensor is not None and i < output_fake_tensor.ndim:
+                        dim_size = output_fake_tensor.size(i)
+                        if hasattr(dim_size, '_sympy_'):
+                            # It's a SymInt, resolve via Origin
+                            size_ssa = resolve_symint_to_ssa(dim_size, i)
+                        else:
+                            # Concrete int
+                            size_ssa = self.builder.fresh(f"size_dim{i}")
+                            self.builder.emit(f'{size_ssa} = arith.constant {int(dim_size)} : index')
+                        sizes_ssa.append(size_ssa)
+                    else:
+                        # Fallback: use idx_ssa as size (shouldn't happen with proper metadata)
+                        sizes_ssa.append(idx_ssa)
+                        
                 elif 'block_size' in idx.name:
                     # block_size node indicates the tile size for this dimension
                     # The offset comes from the corresponding loop IV
-                    # Compute offset: iv * block_size
                     
                     # Get the current loop IV
                     if hasattr(self, 'current_loop_ivs') and i < len(self.current_loop_ivs):
@@ -810,7 +821,7 @@ class IRVisitor:
                 result_type = f"tensor<{dtype_str}>"
         else:
             # Fallback
-            result_type = self.ctx.tensor_type
+            result_type = f"tensor<?x?xf32>"
             
         self.ctx.node_types[node.name] = result_type
         
@@ -833,13 +844,10 @@ class IRVisitor:
         """Generate tensor.insert_slice for tile storing.
         
         Replaces the custom helion.store with standard MLIR tensor.insert_slice.
-        The insert_slice operation inserts a tile back into the destination tensor.
-        
-        For tiled store like out[tile_m, tile_n] = acc:
-        - offsets come from loop IVs multiplied by tile sizes
-        - sizes come from the tile dimensions
-        - strides are 1 for contiguous access
+        The tile sizes come from the value node's FakeTensor metadata.
         """
+        from helion._compiler.variable_origin import BlockSizeOrigin
+        
         tensor_node = node.args[0]
         indices = node.args[1]
         value = node.args[2]
@@ -849,6 +857,34 @@ class IRVisitor:
         
         value_ssa = self.ctx.node_values.get(value.name, f"%{value.name}") if isinstance(value, fx.Node) else str(value)
         value_type = self._get_tensor_type(value) if isinstance(value, fx.Node) else f"tensor<?x?xf32>"
+        
+        # Get FakeTensor from value node to determine tile sizes
+        value_fake_tensor = value.meta.get("val") if isinstance(value, fx.Node) else None
+        host_function = self.ctx.bound_kernel.host_function
+        shape_env = self.ctx.bound_kernel.env.shape_env
+        
+        # Helper: resolve a SymInt to SSA using Origin lookup
+        def resolve_symint_to_ssa(sym_int, dim_hint: int) -> str:
+            """Resolve a SymInt to its SSA value using Origin-based lookup."""
+            sym = sym_int._sympy_()
+            origin_info = host_function.expr_to_origin.get(sym)
+            origin = origin_info.origin if origin_info else None
+            
+            # BlockSizeOrigin -> use pre-emitted block_size_ssa
+            if isinstance(origin, BlockSizeOrigin):
+                block_id = origin.block_id
+                ssa = self.ctx.block_size_ssa.get(block_id)
+                if ssa is not None:
+                    return ssa
+            
+            # Other origins -> use shape_env for concrete value
+            if sym in shape_env.var_to_val:
+                concrete_val = int(shape_env.var_to_val[sym])
+                ssa = self.builder.fresh(f"size_dim{dim_hint}")
+                self.builder.emit(f'{ssa} = arith.constant {concrete_val} : index')
+                return ssa
+            
+            raise ValueError(f"Cannot resolve SymInt {sym} for dimension {dim_hint}")
         
         # Collect offset and size SSA values for each dimension
         offsets_ssa = []
@@ -873,10 +909,19 @@ class IRVisitor:
                 if 'sym_size' in idx.name:
                     # Tile index as offset
                     offsets_ssa.append(idx_ssa)
-                    # Size from a symbol lookup
-                    size_ssa = self.builder.fresh("tile_size")
-                    self.builder.emit(f'{size_ssa} = "loom.get_symbol"() {{name = "tile_size_{i}"}} : () -> index')
-                    sizes_ssa.append(size_ssa)
+                    
+                    # Size from the value FakeTensor's shape
+                    if value_fake_tensor is not None and i < value_fake_tensor.ndim:
+                        dim_size = value_fake_tensor.size(i)
+                        if hasattr(dim_size, '_sympy_'):
+                            size_ssa = resolve_symint_to_ssa(dim_size, i)
+                        else:
+                            size_ssa = self.builder.fresh(f"size_dim{i}")
+                            self.builder.emit(f'{size_ssa} = arith.constant {int(dim_size)} : index')
+                        sizes_ssa.append(size_ssa)
+                    else:
+                        sizes_ssa.append(idx_ssa)
+                        
                 elif 'block_size' in idx.name:
                     # block_size indicates the tile size, compute offset
                     if hasattr(self, 'current_loop_ivs') and i < len(self.current_loop_ivs):

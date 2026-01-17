@@ -190,26 +190,7 @@ def generate_mlir(
             f'{{name = "block_size_{block_id}"}} : () -> index'
         )
         block_size_ssa[block_id] = ssa
-    
-    # Emit tensor dimension symbols for symbolic tensor dimensions
-    # This centralizes all loom.get_symbol calls for shapes
-    import torch
-    param_names = list(bound_kernel.kernel.signature.parameters.keys())
-    fake_args = bound_kernel.fake_args
-    
-    for name, fake_arg in zip(param_names, fake_args):
-        if isinstance(fake_arg, torch.Tensor):
-            for dim in range(fake_arg.ndim):
-                dim_size = fake_arg.size(dim)
-                if isinstance(dim_size, torch.SymInt):
-                    # Symbolic dimension - emit loom.get_symbol
-                    symbol_name = f"{name}_dim{dim}"
-                    ssa = builder.fresh(symbol_name)
-                    builder.emit(
-                        f'{ssa} = "loom.get_symbol"() '
-                        f'{{name = "{symbol_name}"}} : () -> index'
-                    )
-                    ctx.tensor_dim_ssa[(name, dim)] = ssa
+
     
     # Pre-compute trip counts for reduction loops (needed for affine.for trip count in IRVisitor)
     # These are usually constant or symbolic, but here we emit them as constants if possible

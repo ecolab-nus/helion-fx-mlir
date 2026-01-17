@@ -72,9 +72,7 @@ class LoweringContext:
         if not self.arg_mlir_types:
             raise ValueError("No tensor arguments found")
         
-        # tensor_dim_ssa: maps (arg_name, dim) -> SSA name for symbolic dimension
-        # Populated by helion_mlir.py when emitting loom.get_symbol for symbolic dims
-        self.tensor_dim_ssa: dict[tuple[str, int], str] = {}
+
         
         # Build loop extents from block sizes
         # Key: block_id, Value: concrete extent (from shape_env)

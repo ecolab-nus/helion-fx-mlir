@@ -142,6 +142,12 @@ def main() -> None:
     for i, g in enumerate(bound_kernel.host_function.device_ir.graphs):
         print(f"Graph {i}: {type(g).__name__}")
         g.graph.print_tabular()
+    print("=== Nodes with symbols ===")
+    for i, g in enumerate(bound_kernel.host_function.device_ir.graphs):
+        for node in g.graph.nodes:
+            if "val" in node.meta:
+                print(f"Node {node.name} : {node.meta['val']}")
+                    
     print("\n")
 
     print("=== Compile Environment ===")
