@@ -81,6 +81,14 @@ def main() -> None:
         g.graph.print_tabular()
     print("\n")
 
+    print("=== Nodes with symbols ===")
+    for i, g in enumerate(bound.host_function.device_ir.graphs):
+        for node in g.graph.nodes:
+            if "val" in node.meta:
+                print(f"Node {node.name} : {node.meta['val']}")
+                    
+    print("\n")
+
     mlir_text = generate_mlir(bound)
     print("=== MLIR Dump ===")
     print(mlir_text)
