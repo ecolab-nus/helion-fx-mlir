@@ -44,7 +44,7 @@ class LoweringContext:
         import torch
         
         self.bound_kernel = bound_kernel
-        self.builder = MLIROutputHelper()
+        self.mlir_output_helper = MLIROutputHelper()
         # Always output linalg-on-tensors for now as per user request
         
         # Derive kernel name from the kernel function

@@ -281,9 +281,9 @@ import re
 def inline_torch_mlir_output(
     mlir_text: str, 
     operands: list[str], 
-    builder
+    mlir_output_helper
 ) -> str:
-    """Inline torch-mlir generated text into the current builder.
+    """Inline torch-mlir generated text into the current output helper.
     
     Handles multiline operations like linalg.generic which have block bodies:
     ```
@@ -297,7 +297,7 @@ def inline_torch_mlir_output(
     Args:
         mlir_text: The full MLIR module text from torch-mlir.
         operands: SSA values to use as arguments.
-        builder: The MLIR builder to emit to.
+        mlir_output_helper: The MLIR helper to emit to.
         
     Returns:
         The SSA value of the result.
@@ -307,7 +307,7 @@ def inline_torch_mlir_output(
     
     # Track affine map aliases to inline them
     affine_map_aliases = {}  # old_alias -> (new_alias, affine_map_def)
-    affine_map_counter = getattr(builder, '_affine_map_counter', 0)
+    affine_map_counter = getattr(mlir_output_helper, '_affine_map_counter', 0)
     
     # 1. First pass: collect affine map definitions
     # These are lines like: #map = affine_map<(d0, d1) -> (d0, d1)>
@@ -323,7 +323,7 @@ def inline_torch_mlir_output(
             affine_map_counter += 1
             affine_map_aliases[old_alias] = (new_alias, affine_map_def)
     
-    builder._affine_map_counter = affine_map_counter
+    mlir_output_helper._affine_map_counter = affine_map_counter
     
     # Helper to replace affine map aliases with inline definitions
     # Use regex to ensure we match whole aliases (e.g., #map but not #map1)
@@ -396,7 +396,7 @@ def inline_torch_mlir_output(
             # This is a closing brace for an inline region, emit it
             new_line = replace_ssas(line, ssa_map)
             new_line = replace_affine_maps(new_line)
-            builder.emit(new_line)
+            mlir_output_helper.emit(new_line)
             continue
             
         # Handle Block Args (e.g. ^bb0(%a: f32, %b: f32):)
@@ -413,7 +413,7 @@ def inline_torch_mlir_output(
                         name_part, type_part = arg_def.split(":", 1)
                         name = name_part.strip()
                         if name.startswith("%"):
-                            fresh = builder.fresh("blk_arg")
+                            fresh = mlir_output_helper.fresh("blk_arg")
                             ssa_map[name] = fresh
                             new_args_list.append(f"{fresh}:{type_part}")
                         else:
@@ -425,7 +425,7 @@ def inline_torch_mlir_output(
             else:
                 new_line = line
             new_line = replace_affine_maps(new_line)
-            builder.emit(new_line)
+            mlir_output_helper.emit(new_line)
             continue
 
         # Handle Assignment (lines with '=' that define SSA values)
@@ -451,7 +451,7 @@ def inline_torch_mlir_output(
                             if count_str.isdigit():
                                 # This is a multi-result binding like %0:2
                                 num_results = int(count_str)
-                                fresh = builder.fresh("t")
+                                fresh = mlir_output_helper.fresh("t")
                                 ssa_map[base_var] = fresh
                                 # Also map the indexed versions %0#0, %0#1, etc.
                                 for idx in range(num_results):
@@ -459,11 +459,11 @@ def inline_torch_mlir_output(
                                 new_lhs_vars.append(f"{fresh}:{num_results}")
                             else:
                                 # Not a count suffix, treat as regular var with type annotation
-                                fresh = builder.fresh("t")
+                                fresh = mlir_output_helper.fresh("t")
                                 ssa_map[v.split(":")[0]] = fresh
                                 new_lhs_vars.append(fresh)
                         else:
-                            fresh = builder.fresh("t")
+                            fresh = mlir_output_helper.fresh("t")
                             ssa_map[v] = fresh
                             new_lhs_vars.append(fresh)
                     else:
@@ -484,18 +484,18 @@ def inline_torch_mlir_output(
                 new_rhs = replace_ssas(rhs, ssa_map)
                 new_rhs = replace_affine_maps(new_rhs)
                 
-                builder.emit(f"{new_lhs} = {new_rhs}")
+                mlir_output_helper.emit(f"{new_lhs} = {new_rhs}")
             else:
                 # Not an SSA assignment, emit as-is with SSA replacement
                 new_line = replace_ssas(line, ssa_map)
                 new_line = replace_affine_maps(new_line)
-                builder.emit(new_line)
+                mlir_output_helper.emit(new_line)
             continue
             
         # Handle standalone ops (like linalg.yield, cf.assert, etc.)
         new_line = replace_ssas(line, ssa_map)
         new_line = replace_affine_maps(new_line)
-        builder.emit(new_line)
+        mlir_output_helper.emit(new_line)
 
     return result_ssa
 

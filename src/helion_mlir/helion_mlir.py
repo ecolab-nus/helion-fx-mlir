@@ -68,7 +68,7 @@ def generate_mlir(
     
     # Create lowering context from bound kernel
     ctx = LoweringContext(bound_kernel)
-    builder = ctx.builder
+    builder = ctx.mlir_output_helper
     device_ir = bound_kernel.host_function.device_ir
     
     # Find root and for-loop graphs

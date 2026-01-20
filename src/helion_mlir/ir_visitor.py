@@ -59,7 +59,7 @@ class IRVisitor:
     
     def __init__(self, ctx: "LoweringContext"):
         self.ctx = ctx
-        self.builder = ctx.builder
+        self.mlir_output_helper = ctx.mlir_output_helper
         
         # Loop-local state (managed per loop, not persisted globally)
         # These are reset/managed during visit_for_loop calls
@@ -213,7 +213,7 @@ class IRVisitor:
     def visit_get_attr(self, node: fx.Node) -> str:
         """Handle get_attr nodes."""
         # Just create a placeholder SSA
-        ssa = self.builder.fresh(node.name)
+        ssa = self.mlir_output_helper.fresh(node.name)
         self.ctx.node_values[node.name] = ssa
         return ssa
     
@@ -255,8 +255,8 @@ class IRVisitor:
         shape_env = self.ctx.bound_kernel.env.shape_env
         if sym in shape_env.var_to_val:
             concrete_val = int(shape_env.var_to_val[sym])
-            ssa = self.builder.fresh(node.name.replace(".", "_"))
-            self.builder.emit(f'{ssa} = arith.constant {concrete_val} : index')
+            ssa = self.mlir_output_helper.fresh(node.name.replace(".", "_"))
+            self.mlir_output_helper.emit(f'{ssa} = arith.constant {concrete_val} : index')
             self.ctx.node_values[node.name] = ssa
             return ssa
         
@@ -288,8 +288,8 @@ class IRVisitor:
                 shape_ssa.append(self.ctx.node_values.get(s.name, f"%{s.name}"))
             elif isinstance(s, int):
                 # Integer literals need to be emitted as arith.constant
-                const_ssa = self.builder.fresh("dim")
-                self.builder.emit(f'{const_ssa} = arith.constant {s} : index')
+                const_ssa = self.mlir_output_helper.fresh("dim")
+                self.mlir_output_helper.emit(f'{const_ssa} = arith.constant {s} : index')
                 shape_ssa.append(const_ssa)
             else:
                 raise RuntimeError(f"Unsupported shape type: {type(s)}")
@@ -320,12 +320,12 @@ class IRVisitor:
         else:
             dynamic_shape_ssa = shape_ssa
         
-        empty_ssa = self.builder.fresh("empty")
+        empty_ssa = self.mlir_output_helper.fresh("empty")
         shape_str = ", ".join(dynamic_shape_ssa)
-        self.builder.emit(f'{empty_ssa} = tensor.empty({shape_str}) : {tensor_type}')
+        self.mlir_output_helper.emit(f'{empty_ssa} = tensor.empty({shape_str}) : {tensor_type}')
         
         # Step 2: Emit fill value constant
-        fill_val_ssa = self.builder.fresh("fill_val")
+        fill_val_ssa = self.mlir_output_helper.fresh("fill_val")
         if isinstance(fill_value, float) and (math.isinf(fill_value) or math.isnan(fill_value)):
             # Handle special float values with IEEE 754 hex representation
             if math.isinf(fill_value):
@@ -335,14 +335,14 @@ class IRVisitor:
                     hex_val = "0x7F800000"  # +inf for f32
             else:
                 hex_val = "0x7FC00000"  # nan for f32
-            self.builder.emit(f'{fill_val_ssa} = arith.constant {hex_val} : {dtype_str}')
+            self.mlir_output_helper.emit(f'{fill_val_ssa} = arith.constant {hex_val} : {dtype_str}')
         else:
             # Regular float value
-            self.builder.emit(f'{fill_val_ssa} = arith.constant {fill_value} : {dtype_str}')
+            self.mlir_output_helper.emit(f'{fill_val_ssa} = arith.constant {fill_value} : {dtype_str}')
         
         # Step 3: Emit linalg.fill
-        filled_ssa = self.builder.fresh("filled")
-        self.builder.emit(
+        filled_ssa = self.mlir_output_helper.fresh("filled")
+        self.mlir_output_helper.emit(
             f'{filled_ssa} = linalg.fill ins({fill_val_ssa} : {dtype_str}) '
             f'outs({empty_ssa} : {tensor_type}) -> {tensor_type}'
         )
@@ -380,8 +380,8 @@ class IRVisitor:
                 shape_ssa.append(self.ctx.node_values.get(s.name, f"%{s.name}"))
             elif isinstance(s, int):
                 # Integer literals need to be emitted as arith.constant
-                const_ssa = self.builder.fresh("dim")
-                self.builder.emit(f'{const_ssa} = arith.constant {s} : index')
+                const_ssa = self.mlir_output_helper.fresh("dim")
+                self.mlir_output_helper.emit(f'{const_ssa} = arith.constant {s} : index')
                 shape_ssa.append(const_ssa)
             else:
                 raise RuntimeError(f"Unsupported shape type: {type(s)}")
@@ -412,12 +412,12 @@ class IRVisitor:
         else:
             dynamic_shape_ssa = shape_ssa
         
-        empty_ssa = self.builder.fresh("empty")
+        empty_ssa = self.mlir_output_helper.fresh("empty")
         shape_str = ", ".join(dynamic_shape_ssa)
-        self.builder.emit(f'{empty_ssa} = tensor.empty({shape_str}) : {tensor_type}')
+        self.mlir_output_helper.emit(f'{empty_ssa} = tensor.empty({shape_str}) : {tensor_type}')
         
         # Step 2: Emit fill value constant
-        fill_val_ssa = self.builder.fresh("fill_val")
+        fill_val_ssa = self.mlir_output_helper.fresh("fill_val")
         if isinstance(fill_value, float) and (math.isinf(fill_value) or math.isnan(fill_value)):
             # Handle special float values with IEEE 754 hex representation
             if math.isinf(fill_value):
@@ -427,14 +427,14 @@ class IRVisitor:
                     hex_val = "0x7F800000"  # +inf for f32
             else:
                 hex_val = "0x7FC00000"  # nan for f32
-            self.builder.emit(f'{fill_val_ssa} = arith.constant {hex_val} : {dtype_str}')
+            self.mlir_output_helper.emit(f'{fill_val_ssa} = arith.constant {hex_val} : {dtype_str}')
         else:
             # Regular float value
-            self.builder.emit(f'{fill_val_ssa} = arith.constant {fill_value} : {dtype_str}')
+            self.mlir_output_helper.emit(f'{fill_val_ssa} = arith.constant {fill_value} : {dtype_str}')
         
         # Step 3: Emit linalg.fill
-        filled_ssa = self.builder.fresh("filled")
-        self.builder.emit(
+        filled_ssa = self.mlir_output_helper.fresh("filled")
+        self.mlir_output_helper.emit(
             f'{filled_ssa} = linalg.fill ins({fill_val_ssa} : {dtype_str}) '
             f'outs({empty_ssa} : {tensor_type}) -> {tensor_type}'
         )
@@ -509,7 +509,7 @@ class IRVisitor:
         
         # Emit affine.for
         iv = f"%iv_block{block_id}"
-        result = self.builder.fresh(f"for_result_{graph_id}")
+        result = self.mlir_output_helper.fresh(f"for_result_{graph_id}")
         
         # Build iter_args string
         iter_args_parts = []
@@ -527,11 +527,11 @@ class IRVisitor:
         else:
             result_binding = result
         
-        self.builder.emit(
+        self.mlir_output_helper.emit(
             f'{result_binding} = affine.for {iv} = 0 to {trip_count_ssa} '
             f'iter_args({iter_args_str}) -> ({result_types}) {{'
         )
-        self.builder.push()
+        self.mlir_output_helper.push()
         
         # Set up args inside loop - map placeholder names to appropriate SSA values
         old_loop_iter_args = self.loop_iter_args.copy()
@@ -583,15 +583,15 @@ class IRVisitor:
             # Multiple yield values
             yield_values = ", ".join(self.current_loop_result)
             yield_types = ", ".join(iter_args_types)
-            self.builder.emit(f'affine.yield {yield_values} : {yield_types}')
+            self.mlir_output_helper.emit(f'affine.yield {yield_values} : {yield_types}')
         else:
             # Single yield value (backward compatible)
             yield_value = self.current_loop_result[0] if isinstance(self.current_loop_result, list) else (self.current_loop_result or f"%{iter_args_info[0][0]}")
             yield_type = iter_args_types[0] if iter_args_types else f"tensor<?x?xf32>"
-            self.builder.emit(f'affine.yield {yield_value} : {yield_type}')
+            self.mlir_output_helper.emit(f'affine.yield {yield_value} : {yield_type}')
         
-        self.builder.pop()
-        self.builder.emit("}")
+        self.mlir_output_helper.pop()
+        self.mlir_output_helper.emit("}")
         
         # Store the loop result - for multi-value loops, this SSA represents all results
         # Individual results are extracted via getitem
@@ -725,11 +725,11 @@ class IRVisitor:
         tensor_type = self._get_tensor_type(tensor_node) if isinstance(tensor_node, fx.Node) else f"tensor<?x?xf32>"
         
         # Emit tensor.dim to get the dimension size
-        dim_idx_ssa = self.builder.fresh("dim_idx")
-        self.builder.emit(f'{dim_idx_ssa} = arith.constant {dim} : index')
+        dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
+        self.mlir_output_helper.emit(f'{dim_idx_ssa} = arith.constant {dim} : index')
         
-        result_ssa = self.builder.fresh("dim_size")
-        self.builder.emit(f'{result_ssa} = tensor.dim {tensor_ssa}, {dim_idx_ssa} : {tensor_type}')
+        result_ssa = self.mlir_output_helper.fresh("dim_size")
+        self.mlir_output_helper.emit(f'{result_ssa} = tensor.dim {tensor_ssa}, {dim_idx_ssa} : {tensor_type}')
         
         self.ctx.node_values[node.name] = result_ssa
         return result_ssa
@@ -771,8 +771,8 @@ class IRVisitor:
             # Other origins -> use shape_env for concrete value
             if sym in shape_env.var_to_val:
                 concrete_val = int(shape_env.var_to_val[sym])
-                ssa = self.builder.fresh(f"size_dim{dim_hint}")
-                self.builder.emit(f'{ssa} = arith.constant {concrete_val} : index')
+                ssa = self.mlir_output_helper.fresh(f"size_dim{dim_hint}")
+                self.mlir_output_helper.emit(f'{ssa} = arith.constant {concrete_val} : index')
                 return ssa
             
             raise ValueError(f"Cannot resolve SymInt {sym} for dimension {dim_hint}")
@@ -786,8 +786,8 @@ class IRVisitor:
         for i, idx in enumerate(indices):
             if isinstance(idx, slice):
                 # Full dimension slice - offset=0, size comes from tensor dim
-                zero_ssa = self.builder.fresh("zero")
-                self.builder.emit(f'{zero_ssa} = arith.constant 0 : index')
+                zero_ssa = self.mlir_output_helper.fresh("zero")
+                self.mlir_output_helper.emit(f'{zero_ssa} = arith.constant 0 : index')
                 offsets_ssa.append(zero_ssa)
                 
                 # Get dimension size from tensor
@@ -804,10 +804,10 @@ class IRVisitor:
                                 except ValueError:
                                     pass
                 
-                dim_ssa = self.builder.fresh("dim")
-                dim_idx_ssa = self.builder.fresh("dim_idx")
-                self.builder.emit(f'{dim_idx_ssa} = arith.constant {i} : index')
-                self.builder.emit(f'{dim_ssa} = tensor.dim {tensor_ssa}, {dim_idx_ssa} : {tensor_type}')
+                dim_ssa = self.mlir_output_helper.fresh("dim")
+                dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
+                self.mlir_output_helper.emit(f'{dim_idx_ssa} = arith.constant {i} : index')
+                self.mlir_output_helper.emit(f'{dim_ssa} = tensor.dim {tensor_ssa}, {dim_idx_ssa} : {tensor_type}')
                 sizes_ssa.append(dim_ssa)
                 output_dim_sizes.append(src_dim_static)  # Preserve static size
             elif isinstance(idx, fx.Node):
@@ -829,8 +829,8 @@ class IRVisitor:
                             output_dim_sizes.append(None)  # Dynamic
                         else:
                             # Concrete int
-                            size_ssa = self.builder.fresh(f"size_dim{i}")
-                            self.builder.emit(f'{size_ssa} = arith.constant {int(dim_size)} : index')
+                            size_ssa = self.mlir_output_helper.fresh(f"size_dim{i}")
+                            self.mlir_output_helper.emit(f'{size_ssa} = arith.constant {int(dim_size)} : index')
                             output_dim_sizes.append(int(dim_size))  # Static
                         sizes_ssa.append(size_ssa)
                     else:
@@ -851,8 +851,8 @@ class IRVisitor:
                         iv_ssa = f"%iv_block{i}"
                     
                     # Compute offset: iv * block_size
-                    offset_ssa = self.builder.fresh("offset")
-                    self.builder.emit(
+                    offset_ssa = self.mlir_output_helper.fresh("offset")
+                    self.mlir_output_helper.emit(
                         f'{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index'
                     )
                     offsets_ssa.append(offset_ssa)
@@ -861,23 +861,23 @@ class IRVisitor:
                 else:
                     # Generic index - treat as offset with unknown size
                     offsets_ssa.append(idx_ssa)
-                    size_ssa = self.builder.fresh("size")
-                    self.builder.emit(f'{size_ssa} = arith.constant 1 : index')
+                    size_ssa = self.mlir_output_helper.fresh("size")
+                    self.mlir_output_helper.emit(f'{size_ssa} = arith.constant 1 : index')
                     sizes_ssa.append(size_ssa)
                     output_dim_sizes.append(1)  # Static size 1
             elif isinstance(idx, int):
                 # Integer literal offset
-                offset_ssa = self.builder.fresh("offset")
-                self.builder.emit(f'{offset_ssa} = arith.constant {idx} : index')
+                offset_ssa = self.mlir_output_helper.fresh("offset")
+                self.mlir_output_helper.emit(f'{offset_ssa} = arith.constant {idx} : index')
                 offsets_ssa.append(offset_ssa)
-                size_ssa = self.builder.fresh("size")
-                self.builder.emit(f'{size_ssa} = arith.constant 1 : index')
+                size_ssa = self.mlir_output_helper.fresh("size")
+                self.mlir_output_helper.emit(f'{size_ssa} = arith.constant 1 : index')
                 sizes_ssa.append(size_ssa)
                 output_dim_sizes.append(1)  # Static size 1
             else:
                 raise RuntimeError(f"Unsupported index type: {type(idx)}")
         
-        result = self.builder.fresh("slice")
+        result = self.mlir_output_helper.fresh("slice")
         
         # Construct result type using tracked dimension sizes
         # Static dimensions use the concrete value, dynamic use '?'
@@ -924,7 +924,7 @@ class IRVisitor:
         strides_str = ", ".join(["1"] * len(indices))
         
         # Use tensor.extract_slice syntax
-        self.builder.emit(
+        self.mlir_output_helper.emit(
             f'{result} = tensor.extract_slice {tensor_ssa}[{offsets_str}][{sizes_str}][{strides_str}] : '
             f'{tensor_type} to {result_type}'
         )
@@ -972,8 +972,8 @@ class IRVisitor:
             # Other origins -> use shape_env for concrete value
             if sym in shape_env.var_to_val:
                 concrete_val = int(shape_env.var_to_val[sym])
-                ssa = self.builder.fresh(f"size_dim{dim_hint}")
-                self.builder.emit(f'{ssa} = arith.constant {concrete_val} : index')
+                ssa = self.mlir_output_helper.fresh(f"size_dim{dim_hint}")
+                self.mlir_output_helper.emit(f'{ssa} = arith.constant {concrete_val} : index')
                 return ssa
             
             raise ValueError(f"Cannot resolve SymInt {sym} for dimension {dim_hint}")
@@ -987,8 +987,8 @@ class IRVisitor:
         for i, idx in enumerate(indices):
             if isinstance(idx, slice):
                 # Full dimension slice - offset=0, size comes from source tensor dim
-                zero_ssa = self.builder.fresh("zero")
-                self.builder.emit(f'{zero_ssa} = arith.constant 0 : index')
+                zero_ssa = self.mlir_output_helper.fresh("zero")
+                self.mlir_output_helper.emit(f'{zero_ssa} = arith.constant 0 : index')
                 offsets_ssa.append(zero_ssa)
                 
                 # Check if value tensor's dimension is static
@@ -1005,10 +1005,10 @@ class IRVisitor:
                                     pass
                 
                 # Get dimension size from value tensor
-                dim_ssa = self.builder.fresh("dim")
-                dim_idx_ssa = self.builder.fresh("dim_idx")
-                self.builder.emit(f'{dim_idx_ssa} = arith.constant {i} : index')
-                self.builder.emit(f'{dim_ssa} = tensor.dim {value_ssa}, {dim_idx_ssa} : {value_type}')
+                dim_ssa = self.mlir_output_helper.fresh("dim")
+                dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
+                self.mlir_output_helper.emit(f'{dim_idx_ssa} = arith.constant {i} : index')
+                self.mlir_output_helper.emit(f'{dim_ssa} = tensor.dim {value_ssa}, {dim_idx_ssa} : {value_type}')
                 sizes_ssa.append(dim_ssa)
                 output_dim_sizes.append(src_dim_static)
             elif isinstance(idx, fx.Node):
@@ -1026,8 +1026,8 @@ class IRVisitor:
                             sizes_ssa.append(size_ssa)
                             output_dim_sizes.append(None)  # Dynamic
                         else:
-                            size_ssa = self.builder.fresh(f"size_dim{i}")
-                            self.builder.emit(f'{size_ssa} = arith.constant {int(dim_size)} : index')
+                            size_ssa = self.mlir_output_helper.fresh(f"size_dim{i}")
+                            self.mlir_output_helper.emit(f'{size_ssa} = arith.constant {int(dim_size)} : index')
                             sizes_ssa.append(size_ssa)
                             output_dim_sizes.append(int(dim_size))  # Static
                     else:
@@ -1041,35 +1041,35 @@ class IRVisitor:
                     else:
                         iv_ssa = f"%iv_block{i}"
                     
-                    offset_ssa = self.builder.fresh("offset")
-                    self.builder.emit(f'{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index')
+                    offset_ssa = self.mlir_output_helper.fresh("offset")
+                    self.mlir_output_helper.emit(f'{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index')
                     offsets_ssa.append(offset_ssa)
                     sizes_ssa.append(idx_ssa)
                     output_dim_sizes.append(None)  # Dynamic (block sizes are runtime)
                 else:
                     offsets_ssa.append(idx_ssa)
-                    size_ssa = self.builder.fresh("size")
-                    self.builder.emit(f'{size_ssa} = arith.constant 1 : index')
+                    size_ssa = self.mlir_output_helper.fresh("size")
+                    self.mlir_output_helper.emit(f'{size_ssa} = arith.constant 1 : index')
                     sizes_ssa.append(size_ssa)
                     output_dim_sizes.append(1)  # Static size 1
             elif isinstance(idx, int):
-                offset_ssa = self.builder.fresh("offset")
-                self.builder.emit(f'{offset_ssa} = arith.constant {idx} : index')
+                offset_ssa = self.mlir_output_helper.fresh("offset")
+                self.mlir_output_helper.emit(f'{offset_ssa} = arith.constant {idx} : index')
                 offsets_ssa.append(offset_ssa)
-                size_ssa = self.builder.fresh("size")
-                self.builder.emit(f'{size_ssa} = arith.constant 1 : index')
+                size_ssa = self.mlir_output_helper.fresh("size")
+                self.mlir_output_helper.emit(f'{size_ssa} = arith.constant 1 : index')
                 sizes_ssa.append(size_ssa)
                 output_dim_sizes.append(1)  # Static size 1
             else:
-                offset_ssa = self.builder.fresh("offset")
-                self.builder.emit(f'{offset_ssa} = arith.constant 0 : index')
+                offset_ssa = self.mlir_output_helper.fresh("offset")
+                self.mlir_output_helper.emit(f'{offset_ssa} = arith.constant 0 : index')
                 offsets_ssa.append(offset_ssa)
-                size_ssa = self.builder.fresh("size")
-                self.builder.emit(f'{size_ssa} = arith.constant 1 : index')
+                size_ssa = self.mlir_output_helper.fresh("size")
+                self.mlir_output_helper.emit(f'{size_ssa} = arith.constant 1 : index')
                 sizes_ssa.append(size_ssa)
                 output_dim_sizes.append(1)  # Static size 1
         
-        result = self.builder.fresh("inserted")
+        result = self.mlir_output_helper.fresh("inserted")
         
         # Format as tensor.insert_slice
         # For static dimensions, use the concrete value in sizes bracket (not SSA)
@@ -1088,7 +1088,7 @@ class IRVisitor:
         strides_str = ", ".join(["1"] * len(indices))
         
         # tensor.insert_slice %source into %dest[offsets][sizes][strides] : source_type into dest_type
-        self.builder.emit(
+        self.mlir_output_helper.emit(
             f'{result} = tensor.insert_slice {value_ssa} into {tensor_ssa}[{offsets_str}][{sizes_str}][{strides_str}] : '
             f'{value_type} into {tensor_type}'
         )
@@ -1188,15 +1188,15 @@ class IRVisitor:
                 if isinstance(idx, slice):
                     # Handle slice(None) aka [:]
                     # Offset 0
-                    zero_ssa = self.builder.fresh("zero")
-                    self.builder.emit(f'{zero_ssa} = arith.constant 0 : index')
+                    zero_ssa = self.mlir_output_helper.fresh("zero")
+                    self.mlir_output_helper.emit(f'{zero_ssa} = arith.constant 0 : index')
                     offsets_ssa.append(zero_ssa)
                     
                     # Size: dim(input, input_dim_idx)
-                    dim_ssa = self.builder.fresh("dim")
-                    dim_idx_ssa = self.builder.fresh("dim_idx")
-                    self.builder.emit(f'{dim_idx_ssa} = arith.constant {input_dim_idx} : index')
-                    self.builder.emit(f'{dim_ssa} = tensor.dim {current_ssa}, {dim_idx_ssa} : {source_type}')
+                    dim_ssa = self.mlir_output_helper.fresh("dim")
+                    dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
+                    self.mlir_output_helper.emit(f'{dim_idx_ssa} = arith.constant {input_dim_idx} : index')
+                    self.mlir_output_helper.emit(f'{dim_ssa} = tensor.dim {current_ssa}, {dim_idx_ssa} : {source_type}')
                     
                     sizes_ssa.append(dim_ssa)
                     strides_ssa.append("1") # Default stride 1
@@ -1209,14 +1209,14 @@ class IRVisitor:
                     if isinstance(idx, fx.Node):
                         idx_val = self.ctx.node_values.get(idx.name, f"%{idx.name}")
                     else:
-                        idx_c = self.builder.fresh("idx")
-                        self.builder.emit(f'{idx_c} = arith.constant {idx} : index')
+                        idx_c = self.mlir_output_helper.fresh("idx")
+                        self.mlir_output_helper.emit(f'{idx_c} = arith.constant {idx} : index')
                         idx_val = idx_c
                         
                     offsets_ssa.append(idx_val)
                     
-                    one_ssa = self.builder.fresh("one")
-                    self.builder.emit(f'{one_ssa} = arith.constant 1 : index')
+                    one_ssa = self.mlir_output_helper.fresh("one")
+                    self.mlir_output_helper.emit(f'{one_ssa} = arith.constant 1 : index')
                     sizes_ssa.append(one_ssa)
                     strides_ssa.append("1")
                     
@@ -1232,13 +1232,13 @@ class IRVisitor:
             result_type = f"tensor<{dims_str}xf32>"
             extracted_type = result_type
             
-            result_slice = self.builder.fresh("slice")
+            result_slice = self.mlir_output_helper.fresh("slice")
             
             offsets_str = ", ".join(offsets_ssa)
             sizes_str = ", ".join(sizes_ssa)
             strides_str = ", ".join(strides_ssa)
             
-            self.builder.emit(
+            self.mlir_output_helper.emit(
                 f'{result_slice} = tensor.extract_slice {current_ssa}[{offsets_str}][{sizes_str}][{strides_str}] : '
                 f'{source_type} to {result_type}'
             )
@@ -1312,7 +1312,7 @@ class IRVisitor:
             dims_str = "x".join(result_dims)
             result_type = f"tensor<{dims_str}xf32>"
             
-            result_expand = self.builder.fresh("expand")
+            result_expand = self.mlir_output_helper.fresh("expand")
             
             # Compute output_shape for dynamic dimensions
             # For each output dimension, we need its size as an SSA value
@@ -1321,21 +1321,21 @@ class IRVisitor:
             for i, dtype in enumerate(output_dim_types):
                 if dtype == 'new':
                     # New dimension from None - always size 1
-                    one_ssa = self.builder.fresh("one")
-                    self.builder.emit(f'{one_ssa} = arith.constant 1 : index')
+                    one_ssa = self.mlir_output_helper.fresh("one")
+                    self.mlir_output_helper.emit(f'{one_ssa} = arith.constant 1 : index')
                     output_shape_ssas.append(one_ssa)
                 else:
                     # Real dimension - get from source tensor
-                    dim_idx_ssa = self.builder.fresh("dim_idx")
-                    dim_ssa = self.builder.fresh("dim")
-                    self.builder.emit(f'{dim_idx_ssa} = arith.constant {extracted_dim_idx} : index')
-                    self.builder.emit(f'{dim_ssa} = tensor.dim {extracted_ssa}, {dim_idx_ssa} : {extracted_type}')
+                    dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
+                    dim_ssa = self.mlir_output_helper.fresh("dim")
+                    self.mlir_output_helper.emit(f'{dim_idx_ssa} = arith.constant {extracted_dim_idx} : index')
+                    self.mlir_output_helper.emit(f'{dim_ssa} = tensor.dim {extracted_ssa}, {dim_idx_ssa} : {extracted_type}')
                     output_shape_ssas.append(dim_ssa)
                     extracted_dim_idx += 1
             
             output_shape_str = "[" + ", ".join(output_shape_ssas) + "]"
             
-            self.builder.emit(
+            self.mlir_output_helper.emit(
                 f'{result_expand} = tensor.expand_shape {extracted_ssa} {reassoc_str} '
                 f'output_shape {output_shape_str} : '
                 f'{extracted_type} into {result_type}'
@@ -1388,7 +1388,7 @@ class IRVisitor:
         
         # Inline the generated MLIR
         from .torch_mlir_helper import inline_torch_mlir_output
-        result = inline_torch_mlir_output(mlir_text, tensor_operands, self.builder)
+        result = inline_torch_mlir_output(mlir_text, tensor_operands, self.mlir_output_helper)
         
         self.ctx.node_values[node.name] = result
         return result
