@@ -33,7 +33,7 @@ _SRC_ROOT = _REPO_ROOT / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
-from helion_mlir import generate_mlir, validate_with_mlir_opt
+from helion_mlir import generate_mlir, validate_with_mlir_opt, print_debug_info
 
 
 # %%
@@ -138,27 +138,9 @@ def main() -> None:
     y = torch.randn([k, n], device="cpu", dtype=torch.float32)
     bound_kernel = matmul.bind((x, y))
 
-    print("=== Device IR ===")
-    for i, g in enumerate(bound_kernel.host_function.device_ir.graphs):
-        print(f"Graph {i}: {type(g).__name__}")
-        g.graph.print_tabular()
-    print("=== Nodes with symbols ===")
-    for i, g in enumerate(bound_kernel.host_function.device_ir.graphs):
-        for node in g.graph.nodes:
-            if "val" in node.meta:
-                print(f"Node {node.name} : {node.meta['val']}")
-                    
-    print("\n")
+    print_debug_info(bound_kernel)
 
-    print("=== Compile Environment ===")
-    env = bound_kernel.env
-    print(f"Block Sizes ({len(env.block_sizes)}):")
-    for bs in env.block_sizes:
-        print(f"  Block {bs.block_id}: Size={bs.size}, Var={bs.var}, Reduction={bs.reduction}, Source={bs.block_size_source}")
-    print(f"Shape Env ({len(env.shape_env.var_to_val)}):")
-    for var, val in env.shape_env.var_to_val.items():
-        print(f"  Var {var}: {val}")
-    print("\n")
+
 
     mlir_text = generate_mlir(
         bound_kernel

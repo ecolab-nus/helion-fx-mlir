@@ -40,6 +40,14 @@ from .torch_mlir_helper import (
     import_aten_node_to_mlir,
 )
 
+# Debug utilities
+from .debug_utils import (
+    print_debug_info,
+    print_device_ir,
+    print_nodes_with_symbols,
+    print_compile_env,
+)
+
 __all__ = [
     # Main entry points
     "generate_mlir",
@@ -57,4 +65,9 @@ __all__ = [
     "LoweringContext",
     "first_debug_name",
     "collect_reduction_block_ids",
+    # Debug utilities
+    "print_debug_info",
+    "print_device_ir",
+    "print_nodes_with_symbols",
+    "print_compile_env",
 ]

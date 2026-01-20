@@ -11,7 +11,7 @@ _SYS_SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SYS_SRC) not in sys.path:
     sys.path.insert(0, str(_SYS_SRC))
 
-from helion_mlir import generate_mlir, validate_with_mlir_opt
+from helion_mlir import generate_mlir, validate_with_mlir_opt, print_debug_info
 
 
 @helion.kernel(
@@ -68,26 +68,7 @@ def main() -> None:
     v = torch.randn([256, 512, 128])
     bound = attention.bind((q, k, v))
 
-    print("=== Device IR ===")
-    rolled_ids = {
-        info.new_graph_id 
-        for info in bound.host_function.device_ir.rolled_reductions 
-        if info.new_graph_id is not None
-    }
-    for i, g in enumerate(bound.host_function.device_ir.graphs):
-        if i in rolled_ids:
-            continue
-        print(f"Graph {i}: {type(g).__name__}")
-        g.graph.print_tabular()
-    print("\n")
-
-    print("=== Nodes with symbols ===")
-    for i, g in enumerate(bound.host_function.device_ir.graphs):
-        for node in g.graph.nodes:
-            if "val" in node.meta:
-                print(f"Node {node.name} : {node.meta['val']}")
-                    
-    print("\n")
+    print_debug_info(bound)
 
     mlir_text = generate_mlir(bound)
     print("=== MLIR Dump ===")
