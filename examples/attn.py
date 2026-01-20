@@ -15,7 +15,7 @@ from helion_mlir import generate_mlir, validate_with_mlir_opt, print_debug_info
 
 
 @helion.kernel(
-    static_shapes=True,
+    static_shapes=False,
     autotune_config_overrides={
         "range_unroll_factors": [0, 0],
         "range_num_stages": [0, 0],

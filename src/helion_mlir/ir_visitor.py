@@ -242,9 +242,19 @@ class IRVisitor:
         origin_info = host_function.expr_to_origin.get(sym)
         origin = origin_info.origin if origin_info else None
         
-        # 1. BlockSizeOrigin -> use pre-emitted block_size_ssa
+        # 1. BlockSizeOrigin -> check if concrete int size, otherwise use pre-emitted block_size_ssa
         if isinstance(origin, BlockSizeOrigin):
             block_id = origin.block_id
+            block_info = self.ctx.env.block_sizes[block_id]
+            
+            # If size is a concrete int, emit arith.constant instead of looking up SSA
+            if isinstance(block_info.size, int):
+                ssa = self.mlir_output_helper.fresh(node.name.replace(".", "_"))
+                self.mlir_output_helper.emit(f'{ssa} = arith.constant {block_info.size} : index')
+                self.ctx.node_values[node.name] = ssa
+                return ssa
+            
+            # Symbolic size -> use pre-emitted block_size_ssa
             ssa = self.ctx.block_size_ssa.get(block_id)
             if ssa is None:
                 raise ValueError(f"No block_size_ssa for block_id={block_id}")
@@ -761,9 +771,18 @@ class IRVisitor:
             origin_info = host_function.expr_to_origin.get(sym)
             origin = origin_info.origin if origin_info else None
             
-            # BlockSizeOrigin -> use pre-emitted block_size_ssa
+            # BlockSizeOrigin -> check if concrete int size, otherwise use pre-emitted block_size_ssa
             if isinstance(origin, BlockSizeOrigin):
                 block_id = origin.block_id
+                block_info = self.ctx.env.block_sizes[block_id]
+                
+                # If size is concrete int, emit arith.constant
+                if isinstance(block_info.size, int):
+                    ssa = self.mlir_output_helper.fresh(f"size_dim{dim_hint}")
+                    self.mlir_output_helper.emit(f'{ssa} = arith.constant {block_info.size} : index')
+                    return ssa
+                
+                # Symbolic size -> use pre-emitted block_size_ssa
                 ssa = self.ctx.block_size_ssa.get(block_id)
                 if ssa is not None:
                     return ssa

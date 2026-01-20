@@ -34,6 +34,33 @@ The `size` field represents the **total iteration space** for this dimension, NO
 
 **Example**: For `hl.tile(512)`, the `size=512` but the actual tile size (e.g., 64) comes from `block_size_source`.
 
+### Effect of `static_shapes` on `size`
+
+The kernel decorator's `static_shapes` setting controls whether tensor dimensions become concrete:
+
+```python
+@helion.kernel(static_shapes=True)   # size will be int (e.g., 256, 512)
+@helion.kernel(static_shapes=False)  # size will be SymInt (e.g., s30, s48)
+```
+
+| `static_shapes` | `size` type | Example |
+|-----------------|-------------|---------|
+| `True` | `int` | `Size=256, Size=512` |
+| `False` | `torch.SymInt` | `Size=s30, Size=s48` |
+
+**With `static_shapes=False`** (from your test output):
+```
+Block 0: Size=s30, Var=u4, Reduction=False, Source=LoopSpecBlockSizeSource()
+Block 1: Size=s48, Var=u5, Reduction=False, Source=LoopSpecBlockSizeSource()
+Block 2: Size=128, Var=128, Reduction=True, Source=ReductionLoopBlockSizeSource(reduction_loop=0)
+Block 3: Size=s34, Var=u7, Reduction=False, Source=LoopSpecBlockSizeSource()
+```
+
+Note that:
+- `s30, s48, s34` are **backed SymInts** (symbolic but with known concrete values in `shape_env.var_to_val`)
+- `u4, u5, u7` are **unbacked SymInts** (autotuned tile sizes, resolved from `Config`)
+- Block 2's `size=128` is concrete because `head_dim` was specialized via `hl.specialize()`
+
 ### `var` - The Tile Size Symbol
 
 The `var` field is a **symbolic variable** (`torch.SymInt`) representing the tile size at compile time.

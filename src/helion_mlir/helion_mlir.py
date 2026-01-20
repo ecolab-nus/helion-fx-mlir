@@ -4,7 +4,7 @@ This module generates MLIR from Helion Device IR by walking FX graph nodes
 instruction-by-instruction. Each Device IR operation is mapped to a
 corresponding MLIR operation:
 
-- _get_symnode -> loom.get_symbol
+- _get_symnode -> SSA of loom.get_symbol that is generated at the beginning
 - full -> tensor.empty + linalg.fill
 - _for_loop -> affine.for + recursive visit
 - _phi -> helion.phi
@@ -139,15 +139,23 @@ def generate_mlir(
     for graph_id, graph_info in for_loop_graphs.items():
         ctx.graphs[graph_id] = graph_info
     
-    # Emit block size lookups for ALL blocks using loom.get_symbol
+    # Emit block size lookups for ALL blocks
+    # - Concrete int sizes -> emit arith.constant
+    # - Symbolic sizes -> emit loom.get_symbol
     block_size_ssa = {}
     for info in ctx.env.block_sizes:
         block_id = info.block_id
         ssa = f"%block_size_{block_id}"
-        builder.emit(
-            f'{ssa} = "loom.get_symbol"() '
-            f'{{name = "block_size_{block_id}"}} : () -> index'
-        )
+        
+        if isinstance(info.size, int):
+            # Concrete size -> no need to emit anything
+            pass
+        else:
+            # Symbolic size -> emit loom.get_symbol
+            builder.emit(
+                f'{ssa} = "loom.get_symbol"() '
+                f'{{name = "block_size_{block_id}"}} : () -> index'
+            )
         block_size_ssa[block_id] = ssa
 
     

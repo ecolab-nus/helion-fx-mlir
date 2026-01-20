@@ -235,22 +235,24 @@ class LoweringContext:
         """Get block sizes as module attributes.
         
         Returns a dict mapping attribute name to (value, type) for module attributes.
-        Uses -1 for undefined (symbolic) block sizes.
+        
+        Only emits attributes for blocks with symbolic (non-concrete) sizes.
+        Blocks with concrete int sizes are skipped since they're known constants.
         
         Naming convention:
         - loom.block_size_0, loom.block_size_1, ... = tile sizes for each block ID
         """
         attrs = {}
         # Emit block sizes using block_id-based naming
+        # Only emit for blocks with symbolic sizes (not concrete ints)
         for info in self.env.block_sizes:
-            attr_name = f"loom.block_size_{info.block_id}"
-            
-            # Use size directly if concrete int
+            # Skip blocks with concrete int sizes - they're known constants
             if isinstance(info.size, int):
-                attrs[attr_name] = (info.size, "index")
-            else:
-                # Use -1 for undefined/symbolic sizes
-                attrs[attr_name] = (-1, "index")
+                continue
+            
+            attr_name = f"loom.block_size_{info.block_id}"
+            # Use -1 for undefined/symbolic sizes
+            attrs[attr_name] = (-1, "index")
         
         return attrs
     
