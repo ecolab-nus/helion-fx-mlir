@@ -231,7 +231,7 @@ def generate_mlir(
                 )
                 ub_ssas.append(trip_ssa)
                  
-            iv_names.append(f"%iv_block{block_id}")
+            iv_names.append(f"%iv_block_{block_id}")
         
         # Format parallel loop
         # Lower bound: (0, 0, ...)

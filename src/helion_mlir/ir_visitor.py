@@ -508,7 +508,7 @@ class IRVisitor:
                 raise RuntimeError(f"Cannot compute MLIR type for node {fx_name}")
         
         # Emit affine.for
-        iv = f"%iv_block{block_id}"
+        iv = f"%iv_block_{block_id}"
         result = self.mlir_output_helper.fresh(f"for_result_{graph_id}")
         
         # Build iter_args string
@@ -844,11 +844,12 @@ class IRVisitor:
                     # For reduction loops, use current_block_id; for parallel, use position
                     if self.current_block_id is not None:
                         # Inside a reduction loop - use the current block's IV
-                        iv_ssa = f"%iv_block{self.current_block_id}"
+                        iv_ssa = f"%iv_block_{self.current_block_id}"
                     elif hasattr(self, 'current_loop_ivs') and i < len(self.current_loop_ivs):
                         iv_ssa = self.current_loop_ivs[i]
                     else:
-                        iv_ssa = f"%iv_block{i}"
+                        # TODO double check this block size thing
+                        iv_ssa = f"%iv_block_{i}"
                     
                     # Compute offset: iv * block_size
                     offset_ssa = self.mlir_output_helper.fresh("offset")
@@ -1039,7 +1040,7 @@ class IRVisitor:
                     if hasattr(self, 'current_loop_ivs') and i < len(self.current_loop_ivs):
                         iv_ssa = self.current_loop_ivs[i]
                     else:
-                        iv_ssa = f"%iv_block{i}"
+                        iv_ssa = f"%iv_block_{i}"
                     
                     offset_ssa = self.mlir_output_helper.fresh("offset")
                     self.mlir_output_helper.emit(f'{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index')
