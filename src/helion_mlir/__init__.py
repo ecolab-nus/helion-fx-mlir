@@ -37,7 +37,6 @@ from .lowering_context import (
 # Torch-MLIR integration (via FxImporter)
 from .torch_mlir_helper import (
     TorchMLIRNodeImporter,
-    get_aten_op_info,
     import_aten_node_to_mlir,
 )
 
