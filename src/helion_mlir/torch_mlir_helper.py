@@ -2,7 +2,6 @@
 
 This module provides utilities to convert ATen operations from Helion Device IR
 into MLIR using torch-mlir's FxImporter. It supports generating either:
-- Raw torch dialect MLIR
 - Linalg-on-tensors MLIR (via automatic lowering)
 
 Key Functions:
@@ -168,14 +167,9 @@ class TorchMLIRNodeImporter:
     ATen operations to MLIR text that can be embedded in helion MLIR.
     """
     
-    def __init__(self, output_type: str = "raw"):
-        """Initialize the importer.
-        
-        Args:
-            output_type: Target MLIR dialect - "raw" for torch dialect (default),
-                        "linalg-on-tensors" for linalg, etc.
-        """
-        self.output_type = output_type
+    def __init__(self):
+        """Initialize the importer."""
+        self.output_type = "linalg-on-tensors"
         self._context = None
         self._importer = None
         
@@ -226,21 +220,14 @@ class TorchMLIRNodeImporter:
         # Get the module
         module = self._importer.module
         
-        if self.output_type == "raw":
-            return str(module)
-        
-        # For non-raw output types, we need to run the torch backend pipeline first
-        # This converts RAW torch dialect -> torch backend IR (decompositions, etc.)
-        # Then lower_mlir_module handles torch backend IR -> target dialect
-        
-        # Step 1: Run the torch backend pipeline (RAW -> torch backend IR)
+        # Run the torch backend pipeline (RAW -> torch backend IR)
         run_pipeline_with_repro_report(
             module,
             "builtin.module(func.func(torch-match-quantized-custom-ops), torchdynamo-export-to-torch-backend-pipeline{ extra-library=})",
             "Lowering TorchFX IR -> Torch Backend IR",
         )
         
-        # Step 2: Lower to target dialect (torch backend IR -> linalg/tosa/stablehlo)
+        # Lower to target dialect (torch backend IR -> linalg/tosa/stablehlo)
         module = lower_mlir_module(
             False,  # verbose
             OutputType.get(self.output_type),
@@ -399,7 +386,6 @@ def get_cached_context():
 
 def import_aten_node_to_mlir(
     node: fx.Node,
-    output_type: str = "raw",
 ) -> str:
     """Import an ATen FX node to MLIR using torch-mlir.
     
@@ -407,8 +393,6 @@ def import_aten_node_to_mlir(
     
     Args:
         node: FX node containing an ATen operation
-        output_type: Target MLIR dialect ("raw" for torch dialect (default),
-                    "linalg-on-tensors", "tosa", "stablehlo")
         
     Returns:
         MLIR text for the operation
@@ -420,7 +404,7 @@ def import_aten_node_to_mlir(
     normalize_helion_node(node)
     
     # Create a fresh importer but use the cached context
-    importer = TorchMLIRNodeImporter(output_type=output_type)
+    importer = TorchMLIRNodeImporter()
     importer._context = get_cached_context()
     from torch_mlir.extras.fx_importer import FxImporter
     importer._importer = FxImporter(context=importer._context)
