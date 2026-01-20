@@ -14,7 +14,7 @@ Architecture:
 """
 
 # Main entry points
-from .helion_mlir import generate_mlir, validate_with_mlir_opt
+from .helion_mlir import generate_mlir
 
 # IR visitor for custom extensions
 from .ir_visitor import IRVisitor
@@ -46,6 +46,8 @@ from .debug_utils import (
     print_device_ir,
     print_nodes_with_symbols,
     print_compile_env,
+    validate_with_mlir_opt,
+    run_dce_cleanup,
 )
 
 __all__ = [
@@ -70,4 +72,6 @@ __all__ = [
     "print_device_ir",
     "print_nodes_with_symbols",
     "print_compile_env",
+    "validate_with_mlir_opt",
+    "run_dce_cleanup",
 ]

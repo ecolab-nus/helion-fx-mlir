@@ -1,4 +1,13 @@
-from typing import Any
+from typing import Any, Iterable
+import subprocess
+from pathlib import Path
+
+MLIR_OPT_CANDIDATES = [
+    Path("/mnt/fast/llvm-mlir/bin/mlir-opt"),
+    Path("/usr/bin/mlir-opt"),
+    Path("/usr/local/bin/mlir-opt"),
+]
+
 
 def print_device_ir(bound_kernel: Any) -> None:
     """Prints the Device IR graphs, filtering out rolled reductions."""
@@ -48,3 +57,81 @@ def print_debug_info(bound_kernel: Any) -> None:
     print_device_ir(bound_kernel)
     print_nodes_with_symbols(bound_kernel)
     print_compile_env(bound_kernel)
+
+
+# -----------------------------------------------------------------------------
+# MLIR Validation and Cleanup Utilities
+# -----------------------------------------------------------------------------
+
+def _find_mlir_opt(opt_path: str | Path | None = None) -> Path:
+    """Find mlir-opt executable."""
+    tool_candidates: Iterable[Path] = MLIR_OPT_CANDIDATES if opt_path is None else [Path(opt_path)]
+    
+    for candidate in tool_candidates:
+        if candidate.exists():
+            return candidate
+    
+    raise FileNotFoundError(
+        "Unable to locate `mlir-opt`. "
+        "Install LLVM/MLIR or pass `opt_path` explicitly."
+    )
+
+
+def validate_with_mlir_opt(
+    mlir_text: str,
+    *,
+    opt_path: str | Path | None = None,
+    extra_args: Iterable[str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run `mlir-opt` to confirm the emitted IR parses.
+    
+    Uses -allow-unregistered-dialect to allow loom.* and torch.* operations.
+    """
+    tool = _find_mlir_opt(opt_path)
+    
+    args = [str(tool), "-allow-unregistered-dialect"]
+    if extra_args:
+        args.extend(extra_args)
+    
+    return subprocess.run(
+        args,
+        input=mlir_text,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def run_dce_cleanup(
+    mlir_text: str,
+    *,
+    opt_path: str | Path | None = None,
+) -> str:
+    """Run mlir-opt with dead code elimination pass.
+    
+    Returns the cleaned up MLIR text.
+    Raises RuntimeError if mlir-opt fails.
+    """
+    tool = _find_mlir_opt(opt_path)
+    
+    args = [
+        str(tool),
+        "-allow-unregistered-dialect",
+        "--canonicalize",
+        "--cse",
+    ]
+    
+    result = subprocess.run(
+        args,
+        input=mlir_text,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"mlir-opt DCE cleanup failed: {result.stderr}")
+    
+    return result.stdout

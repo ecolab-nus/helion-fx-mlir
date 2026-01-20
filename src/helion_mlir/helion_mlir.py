@@ -21,9 +21,8 @@ Architecture:
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import math
 
@@ -40,16 +39,14 @@ from .ir_visitor import IRVisitor
 if TYPE_CHECKING:
     from helion._compiler.device_ir import RootGraphInfo, ForLoopGraphInfo
 
-MLIR_OPT_CANDIDATES = [
-    Path("/mnt/fast/llvm-mlir/bin/mlir-opt"),
-    Path("/usr/bin/mlir-opt"),
-    Path("/usr/local/bin/mlir-opt"),
-]
+from .debug_utils import run_dce_cleanup
 
 
 
 def generate_mlir(
-    bound_kernel: "BoundKernel"
+    bound_kernel: "BoundKernel",
+    *,
+    cleanup: bool = True,
 ) -> str:
     """Generate MLIR by walking Device IR instruction-by-instruction.
     
@@ -58,8 +55,7 @@ def generate_mlir(
     
     Args:
         bound_kernel: A bound Helion kernel with fake_args set
-        kernel_name: Optional name override for the generated MLIR function.
-                     If not provided, uses the kernel function's __name__.
+        cleanup: Whether to run mlir-opt canonicalize/cse passes (default: True)
     
     Returns:
         MLIR text representation of the kernel
@@ -271,46 +267,14 @@ def generate_mlir(
     builder.pop()
     builder.emit("}")
     
-    return builder.build()
+    mlir_text = builder.build()
+    
+    if cleanup:
+        try:
+            mlir_text = run_dce_cleanup(mlir_text)
+        except (FileNotFoundError, RuntimeError):
+            # If mlir-opt is not available or fails, return raw text
+            pass
+    
+    return mlir_text
 
-# -----------------------------------------------------------------------------
-# Validation utility
-# -----------------------------------------------------------------------------
-
-
-def validate_with_mlir_opt(
-    mlir_text: str,
-    *,
-    opt_path: str | Path | None = None,
-    extra_args: Iterable[str] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    """Run `mlir-opt` to confirm the emitted IR parses.
-    
-    Uses -allow-unregistered-dialect to allow loom.* and torch.* operations.
-    """
-    tool_candidates: Iterable[Path] = MLIR_OPT_CANDIDATES if opt_path is None else [Path(opt_path)]
-    
-    tool: Path | None = None
-    for candidate in tool_candidates:
-        if candidate.exists():
-            tool = candidate
-            break
-    
-    if tool is None:
-        raise FileNotFoundError(
-            "Unable to locate `mlir-opt`. "
-            "Install LLVM/MLIR or pass `opt_path` explicitly."
-        )
-    
-    args = [str(tool), "-allow-unregistered-dialect"]
-    if extra_args:
-        args.extend(extra_args)
-    
-    return subprocess.run(
-        args,
-        input=mlir_text,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
