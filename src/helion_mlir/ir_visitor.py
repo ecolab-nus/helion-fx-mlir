@@ -28,7 +28,7 @@ import helion.language._tracing_ops as hl_tracing_ops
 import helion.language.creation_ops as hl_creation_ops
 import helion.language.view_ops as hl_view_ops
 
-from .mlir_builder import (
+from .mlir_utils import (
     format_attr_dict,
     format_string_attr,
     torch_dtype_to_mlir_element_type,

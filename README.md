@@ -66,7 +66,7 @@ src/helion_mlir/
 ├── helion_mlir.py           # Entry point: generate_mlir(), validate_with_mlir_opt()
 ├── ir_visitor.py            # IRVisitor: walks FX graphs, dispatches to visit_* methods
 ├── lowering_context.py      # LoweringContext: state (loops, args, SSA mappings)
-├── mlir_builder.py          # MLIRBuilder: text emission, SSA naming, indentation
+├── mlir_utils.py            # MLIROutputHelper: text emission, SSA naming, indentation
 └── torch_mlir_helper.py     # torch-mlir integration for ATen ops
 ```
 

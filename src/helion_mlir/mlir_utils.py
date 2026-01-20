@@ -6,7 +6,7 @@ and provides convenient methods for emitting common MLIR constructs.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import torch
 
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     pass
 
 
-class MLIRBuilder:
+class MLIROutputHelper:
     """Helper class to manage indentation and SSA name creation for MLIR text emission."""
 
     def __init__(self) -> None:
@@ -49,59 +49,6 @@ class MLIRBuilder:
         """Build and return the complete MLIR text."""
         return "\n".join(self._lines) + "\n"
 
-    # -------------------------------------------------------------------------
-    # Module and function emission
-    # -------------------------------------------------------------------------
-
-    def emit_module_start(self, attrs: dict[str, tuple[object, str]] | None = None) -> None:
-        """Emit the start of an MLIR module.
-        
-        Args:
-            attrs: Optional dict of module attributes, mapping name to (value, type).
-                   Example: {"loom.tile_m": (64, "index"), "loom.tensor_dims.x": ('"tile_m,tile_k"', "")}
-                   If type is empty string, the value is emitted as-is (for string attrs).
-        """
-        if attrs:
-            attr_strs = []
-            for name, (value, typ) in attrs.items():
-                if typ:
-                    attr_strs.append(f"{name} = {value} : {typ}")
-                else:
-                    attr_strs.append(f"{name} = {value}")
-            self.emit(f"module attributes {{{', '.join(attr_strs)}}} {{")
-        else:
-            self.emit("module {")
-        self.push()
-
-    def emit_module_end(self) -> None:
-        """Emit the end of an MLIR module."""
-        self.pop()
-        self.emit("}")
-
-    def emit_func_start(
-        self,
-        name: str,
-        args: list[tuple[str, str]],
-        result_type: str | None = None,
-    ) -> None:
-        """Emit the start of a function.
-        
-        Args:
-            name: Function name (without @)
-            args: List of (arg_name, type) tuples, where arg_name includes %
-            result_type: Optional result type string
-        """
-        args_str = ", ".join(f"{arg_name}: {arg_type}" for arg_name, arg_type in args)
-        if result_type:
-            self.emit(f"func.func @{name}({args_str}) -> {result_type} {{")
-        else:
-            self.emit(f"func.func @{name}({args_str}) {{")
-        self.push()
-
-    def emit_func_end(self) -> None:
-        """Emit the end of a function."""
-        self.pop()
-        self.emit("}")
 
 # -----------------------------------------------------------------------------
 # Utility functions for MLIR text formatting

@@ -16,7 +16,7 @@ corresponding MLIR operation:
 Architecture:
 - IRVisitor: Walks FX graphs and generates MLIR via handlers
 - LoweringContext: Holds state during lowering
-- MLIRBuilder: Handles MLIR text emission and SSA naming
+- MLIROutputHelper: Handles MLIR text emission and SSA naming
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from typing import Iterable, TYPE_CHECKING
 
 import math
 
-from .mlir_builder import (
+from .mlir_utils import (
     format_tensor_type,
     format_shape_attr,
 )
@@ -102,7 +102,17 @@ def generate_mlir(
     
     # Emit module start with tile size attributes
     module_attrs = ctx.get_module_attributes()
-    builder.emit_module_start(module_attrs)
+    if module_attrs:
+        attr_strs = []
+        for name, (value, typ) in module_attrs.items():
+            if typ:
+                attr_strs.append(f"{name} = {value} : {typ}")
+            else:
+                attr_strs.append(f"{name} = {value}")
+        builder.emit(f"module attributes {{{', '.join(attr_strs)}}} {{")
+    else:
+        builder.emit("module {")
+    builder.push()
     
     # Build function signature using pre-computed host tensor types from LoweringContext
     # host_tensor_types is computed during LoweringContext init by scanning all graphs
@@ -117,7 +127,12 @@ def generate_mlir(
     result_type = None  # void return
     
     # Emit function start with void return
-    builder.emit_func_start(ctx.kernel_name, func_args, result_type)
+    args_str = ", ".join(f"{arg_name}: {arg_type}" for arg_name, arg_type in func_args)
+    if result_type:
+        builder.emit(f"func.func @{ctx.kernel_name}({args_str}) -> {result_type} {{")
+    else:
+        builder.emit(f"func.func @{ctx.kernel_name}({args_str}) {{")
+    builder.push()
     
     # Create visitor and register all graphs in context
     visitor = IRVisitor(ctx)
@@ -235,8 +250,10 @@ def generate_mlir(
     
     # Emit function end (void return - no return statement needed)
     builder.emit("return")
-    builder.emit_func_end()
-    builder.emit_module_end()
+    builder.pop()
+    builder.emit("}")
+    builder.pop()
+    builder.emit("}")
     
     return builder.build()
 

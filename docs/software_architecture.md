@@ -59,7 +59,7 @@ src/helion_mlir/
 ├── helion_mlir.py           # Main entry: generate_mlir(), validate_with_mlir_opt()
 ├── ir_visitor.py            # IRVisitor: walks FX graphs, dispatches to visit_* methods
 ├── lowering_context.py      # LoweringContext: state (loops, args, SSA mappings)
-├── mlir_builder.py          # MLIRBuilder: text emission, SSA naming, indentation
+├── mlir_utils.py            # MLIROutputHelper: text emission, SSA naming, indentation
 └── torch_mlir_helper.py     # torch-mlir integration for ATen ops
 ```
 
@@ -133,9 +133,9 @@ class LoweringContext:
 - `parallel_block_ids`: Get grid block IDs for parallel loops
 - `env`: Get CompileEnvironment from bound_kernel
 
-### 4. `mlir_builder.py` — Text Emission
+### 4. `mlir_utils.py` — Text Emission
 
-**Purpose**: Low-level MLIR text construction with indentation and SSA naming.
+`mlir_utils.py` provides the `MLIROutputHelper` class, which handles the string construction of the MLIR, including indentation and SSA naming.
 
 **Key Methods**:
 - `emit(text)` — emit with indentation

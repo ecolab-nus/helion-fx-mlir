@@ -10,8 +10,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any, Sequence
 
-from .mlir_builder import (
-    MLIRBuilder,
+from .mlir_utils import (
+    MLIROutputHelper,
     torch_dtype_to_mlir_element_type,
     format_tensor_type,
 )
@@ -44,7 +44,7 @@ class LoweringContext:
         import torch
         
         self.bound_kernel = bound_kernel
-        self.builder = MLIRBuilder()
+        self.builder = MLIROutputHelper()
         # Always output linalg-on-tensors for now as per user request
         self.aten_output_type = "linalg-on-tensors"
         

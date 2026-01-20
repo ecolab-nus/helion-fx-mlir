@@ -9,7 +9,7 @@ Main entry points:
 
 Architecture:
 - IRVisitor: Walks FX graphs instruction-by-instruction
-- MLIRBuilder: Text emission and SSA naming
+- MLIROutputHelper: Text emission and SSA naming
 - LoweringContext: State management during lowering
 """
 
@@ -20,8 +20,8 @@ from .helion_mlir import generate_mlir, validate_with_mlir_opt
 from .ir_visitor import IRVisitor
 
 # Core infrastructure (for extending with new lowerings)
-from .mlir_builder import (
-    MLIRBuilder,
+from .mlir_utils import (
+    MLIROutputHelper,
     torch_dtype_to_mlir_element_type,
     format_tensor_type,
     format_shape_attr,
@@ -48,7 +48,7 @@ __all__ = [
     # IR visitor
     "IRVisitor",
     # Builder and utilities
-    "MLIRBuilder",
+    "MLIROutputHelper",
     "torch_dtype_to_mlir_element_type",
     "format_tensor_type",
     "format_shape_attr",
