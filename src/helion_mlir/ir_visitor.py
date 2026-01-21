@@ -67,6 +67,53 @@ class IRVisitor:
         self.current_loop_result: str | list[str] | None = None  # Set by inner graph output
         self.loop_depth: int = 0  # Depth tracking for nested loops
         self.current_block_id: int | None = None  # Current loop's block_id for IV reference
+    
+    def resolve_dimension(self, dim_size, dim_hint: int = 0) -> tuple[str, bool]:
+        """Resolve a dimension size to an SSA value or inline literal.
+        
+        Args:
+            dim_size: Either an int (concrete) or a SymInt (symbolic) from FakeTensor.size()
+            dim_hint: Optional hint for naming SSA variables
+            
+        Returns:
+            (value_str, is_static) where:
+            - is_static=True means value_str is an inline integer literal (e.g., "128")
+            - is_static=False means value_str is an SSA value (e.g., "%block_size_0")
+        """
+        from helion._compiler.variable_origin import BlockSizeOrigin
+        
+        if not hasattr(dim_size, '_sympy_'):
+            # Concrete int - return inline literal
+            return (str(int(dim_size)), True)
+        
+        # SymInt - look up its origin
+        sym = dim_size._sympy_()
+        host_function = self.ctx.bound_kernel.host_function
+        shape_env = self.ctx.bound_kernel.env.shape_env
+        
+        origin_info = host_function.expr_to_origin.get(sym)
+        origin = origin_info.origin if origin_info else None
+        
+        if isinstance(origin, BlockSizeOrigin):
+            block_id = origin.block_id
+            block_info = self.ctx.env.block_sizes[block_id]
+            
+            # If concrete int size, return inline literal
+            if isinstance(block_info.size, int):
+                return (str(block_info.size), True)
+            
+            # Symbolic - use pre-emitted block_size SSA
+            ssa = self.ctx.block_size_ssa.get(block_id)
+            if ssa:
+                return (ssa, False)
+        
+        # Not a BlockSizeOrigin - check shape_env for concrete value
+        if sym in shape_env.var_to_val:
+            concrete_val = int(shape_env.var_to_val[sym])
+            return (str(concrete_val), True)
+        
+        # Unknown - return None to signal fallback to tensor.dim
+        return (None, False)
         
     # def register_graph(self, graph_id: int, graph_info: "GraphInfo") -> None:
     #     """Register a graph for later visitation (e.g., ForLoopGraphInfo)."""
@@ -712,12 +759,8 @@ class IRVisitor:
         """Handle aten.sym_size.int - get dimension size from a tensor.
         
         In ForLoopGraphInfo, sym_size_int is used to get the dimension size
-        of a tensor argument. For example:
-        - sym_size_int(arg0_1, 0) -> tensor.dim %tensor, 0 (dimension 0 of the tensor)
-        - sym_size_int(arg0_1, 1) -> tensor.dim %tensor, 1 (dimension 1 of the tensor)
-        
-        The tensor_node (e.g., arg0_1) refers to a placeholder that corresponds to
-        an argument passed to the ForLoopGraphInfo from the RootGraphInfo's _for_loop call.
+        of a tensor argument. Optimized to use known dimension values from
+        FakeTensor metadata instead of emitting tensor.dim when possible.
         """
         tensor_node = node.args[0]
         dim = node.args[1]
@@ -731,10 +774,20 @@ class IRVisitor:
         else:
             tensor_ssa = str(tensor_node)
         
-        # Get the tensor type
+        # Try to resolve dimension from FakeTensor metadata
+        if isinstance(tensor_node, fx.Node):
+            fake_tensor = tensor_node.meta.get("val")
+            if fake_tensor is not None and hasattr(fake_tensor, 'ndim') and dim < fake_tensor.ndim:
+                dim_size = fake_tensor.size(dim)
+                value_str, is_static = self.resolve_dimension(dim_size, dim)
+                if value_str is not None:
+                    # We have a known value - use it directly
+                    self.ctx.node_values[node.name] = value_str
+                    return value_str
+        
+        # Fallback: emit tensor.dim to get the dimension size
         tensor_type = self._get_tensor_type(tensor_node) if isinstance(tensor_node, fx.Node) else f"tensor<?x?xf32>"
         
-        # Emit tensor.dim to get the dimension size
         dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
         self.mlir_output_helper.emit(f'{dim_idx_ssa} = arith.constant {dim} : index')
         
@@ -1178,22 +1231,33 @@ class IRVisitor:
             
             input_dim_idx = 0
             
+            # Get FakeTensor from source node for dimension resolution
+            source_fake_tensor = tensor_node.meta.get("val") if isinstance(tensor_node, fx.Node) else None
+            
             for idx in slice_indices:
                 if isinstance(idx, slice):
                     # Handle slice(None) aka [:]
-                    # Offset 0
-                    zero_ssa = self.mlir_output_helper.fresh("zero")
-                    self.mlir_output_helper.emit(f'{zero_ssa} = arith.constant 0 : index')
-                    offsets_ssa.append(zero_ssa)
+                    # Offset 0 - use inline literal
+                    offsets_ssa.append("0")
                     
-                    # Size: dim(input, input_dim_idx)
-                    dim_ssa = self.mlir_output_helper.fresh("dim")
-                    dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
-                    self.mlir_output_helper.emit(f'{dim_idx_ssa} = arith.constant {input_dim_idx} : index')
-                    self.mlir_output_helper.emit(f'{dim_ssa} = tensor.dim {current_ssa}, {dim_idx_ssa} : {source_type}')
+                    # Size: try to resolve from FakeTensor
+                    dim_resolved = None
+                    if source_fake_tensor is not None and input_dim_idx < source_fake_tensor.ndim:
+                        dim_size = source_fake_tensor.size(input_dim_idx)
+                        value_str, is_static = self.resolve_dimension(dim_size, input_dim_idx)
+                        if value_str is not None:
+                            dim_resolved = value_str
                     
-                    sizes_ssa.append(dim_ssa)
-                    strides_ssa.append("1") # Default stride 1
+                    if dim_resolved is None:
+                        # Fallback to tensor.dim
+                        dim_ssa = self.mlir_output_helper.fresh("dim")
+                        dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
+                        self.mlir_output_helper.emit(f'{dim_idx_ssa} = arith.constant {input_dim_idx} : index')
+                        self.mlir_output_helper.emit(f'{dim_ssa} = tensor.dim {current_ssa}, {dim_idx_ssa} : {source_type}')
+                        dim_resolved = dim_ssa
+                    
+                    sizes_ssa.append(dim_resolved)
+                    strides_ssa.append("1")  # Default stride 1
                     input_dim_idx += 1
                     
                 elif isinstance(idx, int) or isinstance(idx, fx.Node):
@@ -1203,15 +1267,11 @@ class IRVisitor:
                     if isinstance(idx, fx.Node):
                         idx_val = self.ctx.node_values.get(idx.name, f"%{idx.name}")
                     else:
-                        idx_c = self.mlir_output_helper.fresh("idx")
-                        self.mlir_output_helper.emit(f'{idx_c} = arith.constant {idx} : index')
-                        idx_val = idx_c
+                        # Use inline literal for constant integers
+                        idx_val = str(idx)
                         
                     offsets_ssa.append(idx_val)
-                    
-                    one_ssa = self.mlir_output_helper.fresh("one")
-                    self.mlir_output_helper.emit(f'{one_ssa} = arith.constant 1 : index')
-                    sizes_ssa.append(one_ssa)
+                    sizes_ssa.append("1")  # Inline literal
                     strides_ssa.append("1")
                     
                     input_dim_idx += 1
@@ -1309,22 +1369,53 @@ class IRVisitor:
             result_expand = self.mlir_output_helper.fresh("expand")
             
             # Compute output_shape for dynamic dimensions
-            # For each output dimension, we need its size as an SSA value
+            # For each output dimension, we need its size as an SSA value or literal
+            # We use the source tensor's FakeTensor to resolve dimensions
             output_shape_ssas = []
             extracted_dim_idx = 0  # Track which dimension of extracted_ssa we're on
+            
+            # Get source FakeTensor for dimension resolution
+            source_fake_tensor = tensor_node.meta.get("val") if isinstance(tensor_node, fx.Node) else None
+            
+            # Build mapping from extracted dims to source dims (accounting for integer indexing)
+            # slice_indices already excludes None, so:
+            # - Each slice contributes one dim (maps to source dim)
+            # - Each int contributes one dim that is size 1 (rank-reducing)
+            source_dim_for_extracted = []
+            src_dim = 0
+            for idx in slice_indices:
+                if isinstance(idx, slice):
+                    source_dim_for_extracted.append(src_dim)
+                    src_dim += 1
+                elif isinstance(idx, int) or isinstance(idx, fx.Node):
+                    # Integer indexing - size is 1, but still consumes a source dim
+                    source_dim_for_extracted.append(src_dim)
+                    src_dim += 1
+            
             for i, dtype in enumerate(output_dim_types):
                 if dtype == 'new':
-                    # New dimension from None - always size 1
-                    one_ssa = self.mlir_output_helper.fresh("one")
-                    self.mlir_output_helper.emit(f'{one_ssa} = arith.constant 1 : index')
-                    output_shape_ssas.append(one_ssa)
+                    # New dimension from None - always size 1 (inline literal)
+                    output_shape_ssas.append("1")
                 else:
-                    # Real dimension - get from source tensor
-                    dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
-                    dim_ssa = self.mlir_output_helper.fresh("dim")
-                    self.mlir_output_helper.emit(f'{dim_idx_ssa} = arith.constant {extracted_dim_idx} : index')
-                    self.mlir_output_helper.emit(f'{dim_ssa} = tensor.dim {extracted_ssa}, {dim_idx_ssa} : {extracted_type}')
-                    output_shape_ssas.append(dim_ssa)
+                    # Real dimension - try to resolve from source FakeTensor
+                    dim_resolved = None
+                    if source_fake_tensor is not None and extracted_dim_idx < len(source_dim_for_extracted):
+                        source_dim = source_dim_for_extracted[extracted_dim_idx]
+                        if source_dim < source_fake_tensor.ndim:
+                            dim_size = source_fake_tensor.size(source_dim)
+                            value_str, is_static = self.resolve_dimension(dim_size, source_dim)
+                            if value_str is not None:
+                                dim_resolved = value_str
+                    
+                    if dim_resolved is None:
+                        # Fallback to tensor.dim
+                        dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
+                        dim_ssa = self.mlir_output_helper.fresh("dim")
+                        self.mlir_output_helper.emit(f'{dim_idx_ssa} = arith.constant {extracted_dim_idx} : index')
+                        self.mlir_output_helper.emit(f'{dim_ssa} = tensor.dim {extracted_ssa}, {dim_idx_ssa} : {extracted_type}')
+                        dim_resolved = dim_ssa
+                    
+                    output_shape_ssas.append(dim_resolved)
                     extracted_dim_idx += 1
             
             output_shape_str = "[" + ", ".join(output_shape_ssas) + "]"
