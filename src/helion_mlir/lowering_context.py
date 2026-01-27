@@ -14,6 +14,7 @@ from .mlir_utils import (
     MLIROutputHelper,
     torch_dtype_to_mlir_element_type,
     format_tensor_type,
+    format_memref_type,
 )
 
 if TYPE_CHECKING:
@@ -148,7 +149,7 @@ class LoweringContext:
                         
                         # Get FakeTensor from node metadata
                         fake_tensor = node.meta.get("val")
-                        mlir_type = self.compute_mlir_type_from_fake_tensor(fake_tensor)
+                        mlir_type = self.compute_mlir_memref_type_from_fake_tensor(fake_tensor)
                         self.host_tensor_types[name] = mlir_type
     
     def compute_mlir_type_from_fake_tensor(self, fake_tensor, dtype: str = "f32") -> str:
@@ -202,6 +203,58 @@ class LoweringContext:
                 shape.append(None)
         
         return format_tensor_type(shape, dtype)
+    
+    def compute_mlir_memref_type_from_fake_tensor(self, fake_tensor, dtype: str = "f32") -> str:
+        """Compute MLIR memref type from a FakeTensor using origin-based logic.
+        
+        For each dimension:
+        - BlockSizeOrigin -> dynamic '?'
+        - Other with concrete value in shape_env -> concrete int
+        - Unknown -> dynamic '?'
+        
+        Args:
+            fake_tensor: A FakeTensor from node.meta['val']
+            dtype: Element type string (default "f32")
+            
+        Returns:
+            MLIR memref type string like "memref<128x256xf32>" or "memref<?x?xf32>"
+        """
+        from helion._compiler.variable_origin import BlockSizeOrigin
+        
+        if fake_tensor is None or not hasattr(fake_tensor, "shape"):
+            raise RuntimeError("FakeTensor is None or does not have shape")
+        
+        host_function = self.bound_kernel.host_function
+        shape_env = self.bound_kernel.env.shape_env
+        
+        # Determine shape: ? for BlockSizeOrigin, concrete otherwise
+        shape = []
+        ndim = len(fake_tensor.shape)
+        for dim_idx in range(ndim):
+            dim_size = fake_tensor.shape[dim_idx]
+            if hasattr(dim_size, '_sympy_'):
+                # This is a SymInt - check its origin
+                sym = dim_size._sympy_()
+                origin_info = host_function.expr_to_origin.get(sym)
+                origin = origin_info.origin if origin_info else None
+                
+                if isinstance(origin, BlockSizeOrigin):
+                    # Dynamic dimension
+                    shape.append(None)
+                elif sym in shape_env.var_to_val:
+                    # Concrete value from shape_env
+                    shape.append(int(shape_env.var_to_val[sym]))
+                else:
+                    # Unknown - use dynamic
+                    shape.append(None)
+            elif isinstance(dim_size, int):
+                # Already concrete
+                shape.append(int(dim_size))
+            else:
+                # Unknown type - use dynamic
+                shape.append(None)
+        
+        return format_memref_type(shape, dtype)
     
     # -------------------------------------------------------------------------
     # Property methods - derive values from bound_kernel

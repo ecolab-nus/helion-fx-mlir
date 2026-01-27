@@ -10,8 +10,8 @@ The visitor dispatches to specific handlers based on the node's target:
 - _phi -> Loop result SSA (simplified merge pattern detection)
 - _host_tensor -> function argument mapping
 - aten.sym_size.int -> inline concrete value or tensor.dim
-- load -> tensor.extract_slice
-- store -> tensor.insert_slice
+- load -> memref.subview + bufferization.to_tensor
+- store -> bufferization.to_memref + memref.copy
 - aten.* compute -> linalg-on-tensors (via torch-mlir)
 """
 
@@ -33,6 +33,7 @@ from .mlir_utils import (
     format_string_attr,
     torch_dtype_to_mlir_element_type,
     format_tensor_type,
+    format_memref_type,
 )
 from .torch_mlir_helper import (
     TorchMLIRNodeImporter,
@@ -811,11 +812,11 @@ class IRVisitor:
         return result_ssa
     
     def visit_load(self, node: fx.Node) -> str:
-        """Generate tensor.extract_slice for tile loading.
+        """Generate memref.subview + bufferization.to_tensor for tile loading.
         
-        Replaces the custom helion.load with standard MLIR tensor.extract_slice.
-        The tile sizes come from the load node's FakeTensor metadata (node.meta['val'].size()),
-        and each dimension's SymInt origin is used to look up the pre-emitted SSA.
+        Host tensors are memref types. This method:
+        1. Emits memref.subview to get a view into the tile
+        2. Emits bufferization.to_tensor to convert to tensor for linalg ops
         
         Uses inline literals for known constants (e.g., [0, %offset][%size, 128][1, 1])
         instead of emitting arith.constant for every value.
@@ -825,8 +826,8 @@ class IRVisitor:
         tensor_node = node.args[0]
         indices = node.args[1]  # [sym_size_int, block_size_2] or [block_size_0, block_size_1, slice(...)]
         
-        tensor_ssa = self.ctx.node_values.get(tensor_node.name, f"%{tensor_node.name}")
-        tensor_type = self._get_tensor_type(tensor_node)
+        memref_ssa = self.ctx.node_values.get(tensor_node.name, f"%{tensor_node.name}")
+        memref_type = self._get_tensor_type(tensor_node)  # Now returns memref type for host tensors
         
         # Get output FakeTensor shape from node metadata to determine tile sizes
         output_fake_tensor = node.meta.get("val")
@@ -868,32 +869,40 @@ class IRVisitor:
         sizes = []    # list of (str, bool)
         output_dim_sizes = []  # Store (static_size | None) for type construction
         
+        # Helper to extract dimensions from memref type string
+        def parse_memref_dimensions(type_str: str) -> list[str]:
+            """Extract dimension strings from a memref type like 'memref<256x128xf32>'."""
+            if 'memref<' in type_str and '>' in type_str:
+                content = type_str[type_str.find('<')+1 : type_str.rfind('>')]
+                if 'x' in content:
+                    return content.split('x')[:-1]  # Exclude dtype
+            return []
+        
+        src_dims = parse_memref_dimensions(memref_type)
+        
         for i, idx in enumerate(indices):
             if isinstance(idx, slice):
-                # Full dimension slice - offset=0 (static), size comes from tensor dim
+                # Full dimension slice - offset=0 (static), size comes from memref dim
                 offsets.append(("0", True))
                 
-                # Get dimension size from tensor
-                # Check if source tensor's dimension is static
+                # Get dimension size from source memref
                 src_dim_static = None
-                if 'tensor<' in tensor_type:
-                    type_content = tensor_type[tensor_type.find('<')+1 : tensor_type.rfind('>')]
-                    if 'x' in type_content:
-                        src_dims = type_content.split('x')[:-1]
-                        if i < len(src_dims):
-                            if src_dims[i] != '?':
-                                try:
-                                    src_dim_static = int(src_dims[i])
-                                except ValueError:
-                                    pass
+                if i < len(src_dims):
+                    if src_dims[i] != '?':
+                        try:
+                            src_dim_static = int(src_dims[i])
+                        except ValueError:
+                            pass
                 
                 if src_dim_static is not None:
                     # Static dimension - use inline literal
                     sizes.append((str(src_dim_static), True))
                 else:
-                    # Dynamic - need tensor.dim
+                    # Dynamic - need memref.dim
+                    dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
+                    self.mlir_output_helper.emit(f'{dim_idx_ssa} = arith.constant {i} : index')
                     dim_ssa = self.mlir_output_helper.fresh("dim")
-                    self.mlir_output_helper.emit(f'{dim_ssa} = tensor.dim {tensor_ssa}, %c{i} : {tensor_type}')
+                    self.mlir_output_helper.emit(f'{dim_ssa} = memref.dim {memref_ssa}, {dim_idx_ssa} : {memref_type}')
                     sizes.append((dim_ssa, False))
                 output_dim_sizes.append(src_dim_static)
                 
@@ -957,55 +966,90 @@ class IRVisitor:
             else:
                 raise RuntimeError(f"Unsupported index type: {type(idx)}")
         
-        result = self.mlir_output_helper.fresh("slice")
-        
-        # Construct result type using tracked dimension sizes
-        # Static dimensions use the concrete value, dynamic use '?'
-        if 'tensor<' in tensor_type and '>' in tensor_type:
-            # Extract dtype from input type
-            content = tensor_type[tensor_type.find('<')+1 : tensor_type.rfind('>')]
-            if 'x' in content:
-                dtype_str = content.split('x')[-1]
-            else:
-                dtype_str = content
-            
-            # Build output dimensions
-            output_dims = []
-            for dim_size in output_dim_sizes:
-                if dim_size is not None:
-                    output_dims.append(str(dim_size))
-                else:
-                    output_dims.append("?")
-            
-            # Construct result type
-            if output_dims:
-                result_type = f"tensor<{'x'.join(output_dims)}x{dtype_str}>"
-            else:
-                result_type = f"tensor<{dtype_str}>"
+        # Extract dtype from memref type
+        content = memref_type[memref_type.find('<')+1 : memref_type.rfind('>')]
+        if 'x' in content:
+            dtype_str = content.split('x')[-1]
         else:
-            raise ValueError(f"Invalid tensor type: {tensor_type}")
+            dtype_str = content
+        
+        # Build output dimensions for both memref subview and tensor result
+        output_dims = []
+        for dim_size in output_dim_sizes:
+            if dim_size is not None:
+                output_dims.append(str(dim_size))
+            else:
+                output_dims.append("?")
+        
+        # Construct subview result type (memref) with strided layout
+        # For memref.subview with dynamic offsets from a static layout source,
+        # the result must have strided layout with offset: ?
+        
+        # Compute strides from source memref dimensions (row-major)
+        # For source memref<D0xD1xD2xf32>, strides are [D1*D2, D2, 1]
+        def compute_strides_from_dims(dims: list[str]) -> list[int] | None:
+            """Compute row-major strides from dimension strings. Returns None if any dim is dynamic."""
+            try:
+                int_dims = [int(d) for d in dims]
+            except ValueError:
+                return None  # Has dynamic dimensions
             
-        self.ctx.node_types[node.name] = result_type
+            strides = []
+            product = 1
+            for d in reversed(int_dims):
+                strides.append(product)
+                product *= d
+            return list(reversed(strides))
+        
+        src_strides = compute_strides_from_dims(src_dims)
+        has_dynamic_offset = any(not is_static for _, is_static in offsets)
+        
+        if output_dims:
+            if src_strides is not None and has_dynamic_offset:
+                # Need strided layout with offset: ? for dynamic offsets from static source
+                strides_str = ", ".join(str(s) for s in src_strides)
+                subview_type = f"memref<{'x'.join(output_dims)}x{dtype_str}, strided<[{strides_str}], offset: ?>>"
+            else:
+                subview_type = f"memref<{'x'.join(output_dims)}x{dtype_str}>"
+        else:
+            subview_type = f"memref<{dtype_str}>"
+        
+        # Construct tensor result type
+        if output_dims:
+            tensor_type = f"tensor<{'x'.join(output_dims)}x{dtype_str}>"
+        else:
+            tensor_type = f"tensor<{dtype_str}>"
+        
+        self.ctx.node_types[node.name] = tensor_type
         
         # Format offsets, sizes, strides - using inline literals or SSA values
         offsets_str = ", ".join(v for v, _ in offsets)
         sizes_str = ", ".join(v for v, _ in sizes)
         strides_str = ", ".join(["1"] * len(indices))
         
-        # Use tensor.extract_slice syntax
+        # Emit memref.subview
+        subview_ssa = self.mlir_output_helper.fresh("subview")
         self.mlir_output_helper.emit(
-            f'{result} = tensor.extract_slice {tensor_ssa}[{offsets_str}][{sizes_str}][{strides_str}] : '
-            f'{tensor_type} to {result_type}'
+            f'{subview_ssa} = memref.subview {memref_ssa}[{offsets_str}][{sizes_str}][{strides_str}] : '
+            f'{memref_type} to {subview_type}'
+        )
+        
+        # Emit bufferization.to_tensor to convert memref view to tensor
+        result = self.mlir_output_helper.fresh("tile")
+        self.mlir_output_helper.emit(
+            f'{result} = bufferization.to_tensor {subview_ssa} : {subview_type} to {tensor_type}'
         )
         
         self.ctx.node_values[node.name] = result
         return result
     
     def visit_store(self, node: fx.Node) -> str:
-        """Generate tensor.insert_slice for tile storing.
+        """Generate memref.subview + bufferization.to_memref + memref.copy for tile storing.
         
-        Replaces the custom helion.store with standard MLIR tensor.insert_slice.
-        The tile sizes come from the value node's FakeTensor metadata.
+        Host tensors are memref types. This method:
+        1. Emits memref.subview to get a view into the destination tile
+        2. Emits bufferization.to_memref to convert source tensor to memref
+        3. Emits memref.copy to copy data into the subview (in-place mutation)
         
         Uses inline literals for known constants (e.g., [0, %offset][%size, 128][1, 1])
         instead of emitting arith.constant for every value.
@@ -1016,8 +1060,8 @@ class IRVisitor:
         indices = node.args[1]
         value = node.args[2]
         
-        tensor_ssa = self.ctx.node_values.get(tensor_node.name, f"%{tensor_node.name}")
-        tensor_type = self._get_tensor_type(tensor_node)  # Use dynamic type for destination
+        memref_ssa = self.ctx.node_values.get(tensor_node.name, f"%{tensor_node.name}")
+        memref_type = self._get_tensor_type(tensor_node)  # Now returns memref type for host tensors
         
         value_ssa = self.ctx.node_values.get(value.name, f"%{value.name}") if isinstance(value, fx.Node) else str(value)
         value_type = self._get_tensor_type(value) if isinstance(value, fx.Node) else f"tensor<?x?xf32>"
@@ -1061,6 +1105,17 @@ class IRVisitor:
         sizes = []    # list of (str, bool)
         output_dim_sizes = []  # Store (static_size | None) for type reference
         
+        # Helper to extract dimensions from type string
+        def parse_type_dimensions(type_str: str) -> list[str]:
+            """Extract dimension strings from a type like 'tensor<256x128xf32>' or 'memref<...>'."""
+            if ('<' in type_str and '>' in type_str):
+                content = type_str[type_str.find('<')+1 : type_str.rfind('>')]
+                if 'x' in content:
+                    return content.split('x')[:-1]  # Exclude dtype
+            return []
+        
+        src_dims = parse_type_dimensions(value_type)
+        
         for i, idx in enumerate(indices):
             if isinstance(idx, slice):
                 # Full dimension slice - offset=0 (static), size comes from value tensor dim
@@ -1068,24 +1123,22 @@ class IRVisitor:
                 
                 # Check if value tensor's dimension is static
                 src_dim_static = None
-                if 'tensor<' in value_type:
-                    type_content = value_type[value_type.find('<')+1 : value_type.rfind('>')]
-                    if 'x' in type_content:
-                        src_dims = type_content.split('x')[:-1]
-                        if i < len(src_dims):
-                            if src_dims[i] != '?':
-                                try:
-                                    src_dim_static = int(src_dims[i])
-                                except ValueError:
-                                    pass
+                if i < len(src_dims):
+                    if src_dims[i] != '?':
+                        try:
+                            src_dim_static = int(src_dims[i])
+                        except ValueError:
+                            pass
                 
                 if src_dim_static is not None:
                     # Static dimension - use inline literal
                     sizes.append((str(src_dim_static), True))
                 else:
-                    # Dynamic - need tensor.dim
+                    # Dynamic - need tensor.dim on value tensor
+                    dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
+                    self.mlir_output_helper.emit(f'{dim_idx_ssa} = arith.constant {i} : index')
                     dim_ssa = self.mlir_output_helper.fresh("dim")
-                    self.mlir_output_helper.emit(f'{dim_ssa} = tensor.dim {value_ssa}, %c{i} : {value_type}')
+                    self.mlir_output_helper.emit(f'{dim_ssa} = tensor.dim {value_ssa}, {dim_idx_ssa} : {value_type}')
                     sizes.append((dim_ssa, False))
                 output_dim_sizes.append(src_dim_static)
                 
@@ -1140,21 +1193,92 @@ class IRVisitor:
                 sizes.append(("1", True))
                 output_dim_sizes.append(1)
         
-        result = self.mlir_output_helper.fresh("inserted")
-        
         # Format offsets, sizes, strides - using inline literals or SSA values
         offsets_str = ", ".join(v for v, _ in offsets)
         sizes_str = ", ".join(v for v, _ in sizes)
         strides_str = ", ".join(["1"] * len(indices))
         
-        # tensor.insert_slice %source into %dest[offsets][sizes][strides] : source_type into dest_type
+        # Extract dtype from memref type
+        content = memref_type[memref_type.find('<')+1 : memref_type.rfind('>')]
+        if 'x' in content:
+            dtype_str = content.split('x')[-1]
+        else:
+            dtype_str = content
+        
+        # Build output dimensions for subview type
+        output_dims = []
+        for dim_size in output_dim_sizes:
+            if dim_size is not None:
+                output_dims.append(str(dim_size))
+            else:
+                output_dims.append("?")
+        
+        # Helper to extract dimensions from memref type string
+        def parse_memref_dimensions(type_str: str) -> list[str]:
+            """Extract dimension strings from a memref type like 'memref<256x128xf32>'."""
+            if 'memref<' in type_str and '>' in type_str:
+                content = type_str[type_str.find('<')+1 : type_str.rfind('>')]
+                # Handle optional layout info by splitting on comma first
+                if ',' in content:
+                    content = content.split(',')[0]
+                if 'x' in content:
+                    return content.split('x')[:-1]  # Exclude dtype
+            return []
+        
+        memref_dims = parse_memref_dimensions(memref_type)
+        
+        # Compute strides from source memref dimensions (row-major)
+        # For source memref<D0xD1xD2xf32>, strides are [D1*D2, D2, 1]
+        def compute_strides_from_dims(dims: list[str]) -> list[int] | None:
+            """Compute row-major strides from dimension strings. Returns None if any dim is dynamic."""
+            try:
+                int_dims = [int(d) for d in dims]
+            except ValueError:
+                return None  # Has dynamic dimensions
+            
+            strides = []
+            product = 1
+            for d in reversed(int_dims):
+                strides.append(product)
+                product *= d
+            return list(reversed(strides))
+        
+        src_strides = compute_strides_from_dims(memref_dims)
+        has_dynamic_offset = any(not is_static for _, is_static in offsets)
+        
+        # Construct subview result type (memref) with strided layout if needed
+        if output_dims:
+            if src_strides is not None and has_dynamic_offset:
+                # Need strided layout with offset: ? for dynamic offsets from static source
+                strides_layout_str = ", ".join(str(s) for s in src_strides)
+                subview_type = f"memref<{'x'.join(output_dims)}x{dtype_str}, strided<[{strides_layout_str}], offset: ?>>"
+            else:
+                subview_type = f"memref<{'x'.join(output_dims)}x{dtype_str}>"
+        else:
+            subview_type = f"memref<{dtype_str}>"
+        
+        # Emit memref.subview to get destination view
+        subview_ssa = self.mlir_output_helper.fresh("subview")
         self.mlir_output_helper.emit(
-            f'{result} = tensor.insert_slice {value_ssa} into {tensor_ssa}[{offsets_str}][{sizes_str}][{strides_str}] : '
-            f'{value_type} into {tensor_type}'
+            f'{subview_ssa} = memref.subview {memref_ssa}[{offsets_str}][{sizes_str}][{strides_str}] : '
+            f'{memref_type} to {subview_type}'
         )
         
-        self.ctx.node_values[node.name] = result
-        return result
+        # Convert value tensor to memref using bufferization.to_buffer
+        # Syntax: %memref = bufferization.to_buffer %tensor : tensor_type to memref_type
+        value_memref_ssa = self.mlir_output_helper.fresh("value_memref")
+        self.mlir_output_helper.emit(
+            f'{value_memref_ssa} = bufferization.to_buffer {value_ssa} : {value_type} to {subview_type}'
+        )
+        
+        # Copy data from value memref to destination subview (in-place mutation)
+        self.mlir_output_helper.emit(
+            f'memref.copy {value_memref_ssa}, {subview_ssa} : {subview_type} to {subview_type}'
+        )
+        
+        # Store operations don't have a useful result, but register node for downstream reference
+        self.ctx.node_values[node.name] = subview_ssa
+        return subview_ssa
     
     def visit_getitem(self, node: fx.Node) -> str:
         """Map getitem to the corresponding loop result.

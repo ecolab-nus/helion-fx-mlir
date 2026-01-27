@@ -88,6 +88,22 @@ def format_tensor_type(shape: Sequence[int | None], element_type: str) -> str:
     return f"tensor<{dims}x{element_type}>"
 
 
+def format_memref_type(shape: Sequence[int | None], element_type: str) -> str:
+    """Format an MLIR memref type string.
+    
+    Args:
+        shape: Memref shape, with None for dynamic dimensions
+        element_type: MLIR element type (e.g., "f32")
+        
+    Returns:
+        MLIR memref type string (e.g., "memref<?x?xf32>")
+    """
+    if not shape:
+        return f"memref<{element_type}>"
+    dims = "x".join("?" if dim is None else str(dim) for dim in shape)
+    return f"memref<{dims}x{element_type}>"
+
+
 def format_shape_attr(shape: Sequence[int | None]) -> str:
     """Format a shape as an MLIR array attribute.
     
