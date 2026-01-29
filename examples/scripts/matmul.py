@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 # Make sure the repo-local src/ package is importable when the example is
 # executed directly.
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_ROOT = _REPO_ROOT / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))

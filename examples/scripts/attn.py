@@ -7,7 +7,7 @@ import torch
 import helion
 import helion.language as hl
 
-_SYS_SRC = Path(__file__).resolve().parents[1] / "src"
+_SYS_SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_SYS_SRC) not in sys.path:
     sys.path.insert(0, str(_SYS_SRC))
 
@@ -70,7 +70,7 @@ def main() -> None:
 
     print_debug_info(bound)
 
-    mlir_text = generate_mlir(bound, cleanup=False)
+    mlir_text = generate_mlir(bound, cleanup=True)
     print("=== MLIR Dump ===")
     print(mlir_text)
     

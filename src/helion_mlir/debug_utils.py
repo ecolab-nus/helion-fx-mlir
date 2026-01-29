@@ -17,6 +17,7 @@ MLIR_OPT_CANDIDATES = [
     Path("/mnt/fast/llvm-mlir/bin/mlir-opt"),
     Path("/usr/bin/mlir-opt"),
     Path("/usr/local/bin/mlir-opt"),
+    Path("/root/llvm-mlir-install/bin/mlir-opt")
 ]
 
 

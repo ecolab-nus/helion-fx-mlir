@@ -269,6 +269,37 @@ class IRVisitor:
     # Specific Node Handlers
     # -------------------------------------------------------------------------
     
+    def _try_get_block_id_from_node(self, node: fx.Node) -> int | None:
+        """Try to extract block_id from a node's BlockSizeOrigin.
+        
+        This is used to determine which loop induction variable corresponds
+        to a given index, ensuring correct offset computation for tile loading/storing.
+        
+        Args:
+            node: FX node that may represent a block_size (e.g., block_size_0 or sym_size_int)
+            
+        Returns:
+            The block_id associated with this node's BlockSizeOrigin, or None if not found
+        """
+        import re
+        from helion._compiler.variable_origin import BlockSizeOrigin
+        
+        # Try to get block_id from BlockSizeOrigin in node metadata
+        sym_val = node.meta.get("val")
+        if sym_val is not None and hasattr(sym_val, '_sympy_'):
+            sym = sym_val._sympy_()
+            host_function = self.ctx.bound_kernel.host_function
+            origin_info = host_function.expr_to_origin.get(sym)
+            if origin_info and isinstance(origin_info.origin, BlockSizeOrigin):
+                return origin_info.origin.block_id
+        
+        # Fallback: parse block_id from node name (e.g., "block_size_0" → 0)
+        match = re.search(r'block_size_(\d+)', node.name)
+        if match:
+            return int(match.group(1))
+        
+        return None
+    
     def visit_get_symnode(self, node: fx.Node) -> str:
         """Look up pre-emitted SSA for symnode references.
         
@@ -907,42 +938,17 @@ class IRVisitor:
                 output_dim_sizes.append(src_dim_static)
                 
             elif isinstance(idx, fx.Node):
-                # Get the SSA value for this index (offset)
+                # Get the SSA value for this index (tile size)
                 idx_ssa = self.ctx.node_values.get(idx.name, f"%{idx.name}")
                 
-                # Determine if this is a loop IV (sym_size_int) or a block size
-                if 'sym_size' in idx.name:
-                    # sym_size_int represents an offset derived from tensor.dim
-                    # Use it directly as the offset (dynamic)
-                    offsets.append((idx_ssa, False))
-                    
-                    # Size comes from the output FakeTensor's shape for this dimension
-                    if output_fake_tensor is not None and i < output_fake_tensor.ndim:
-                        dim_size = output_fake_tensor.size(i)
-                        if hasattr(dim_size, '_sympy_'):
-                            # It's a SymInt, resolve via Origin
-                            size_val, is_static = resolve_symint(dim_size, i)
-                            sizes.append((size_val, is_static))
-                            output_dim_sizes.append(int(size_val) if is_static else None)
-                        else:
-                            # Concrete int - use inline
-                            sizes.append((str(int(dim_size)), True))
-                            output_dim_sizes.append(int(dim_size))
-                    else:
-                        raise RuntimeError(f"Cannot compute MLIR type for node {node.name}")
-                        
-                elif 'block_size' in idx.name:
-                    # block_size node indicates the tile size for this dimension
+                # Check if this index has a BlockSizeOrigin - if so, it represents a tile size
+                # and we need to compute offset as iv * block_size
+                block_id = self._try_get_block_id_from_node(idx)
+                
+                if block_id is not None:
+                    # This index represents a tile size (either block_size_X or sym_size_int with BlockSizeOrigin)
                     # The offset comes from the corresponding loop IV
-                    
-                    # Determine which block_id this index corresponds to
-                    if self.current_block_id is not None:
-                        # Inside a reduction loop - use the current block's IV
-                        iv_ssa = f"%iv_block_{self.current_block_id}"
-                    elif hasattr(self, 'current_loop_ivs') and i < len(self.current_loop_ivs):
-                        iv_ssa = self.current_loop_ivs[i]
-                    else:
-                        iv_ssa = f"%iv_block_{i}"
+                    iv_ssa = f"%iv_block_{block_id}"
                     
                     # Compute offset: iv * block_size (always dynamic since iv is runtime)
                     offset_ssa = self.mlir_output_helper.fresh("offset")
@@ -1145,31 +1151,14 @@ class IRVisitor:
             elif isinstance(idx, fx.Node):
                 idx_ssa = self.ctx.node_values.get(idx.name, f"%{idx.name}")
                 
-                if 'sym_size' in idx.name:
-                    # Tile index as offset (dynamic)
-                    offsets.append((idx_ssa, False))
-                    
-                    # Size from the value FakeTensor's shape
-                    if value_fake_tensor is not None and i < value_fake_tensor.ndim:
-                        dim_size = value_fake_tensor.size(i)
-                        if hasattr(dim_size, '_sympy_'):
-                            size_val, is_static = resolve_symint(dim_size, i)
-                            sizes.append((size_val, is_static))
-                            output_dim_sizes.append(int(size_val) if is_static else None)
-                        else:
-                            # Concrete int - use inline
-                            sizes.append((str(int(dim_size)), True))
-                            output_dim_sizes.append(int(dim_size))
-                    else:
-                        sizes.append((idx_ssa, False))
-                        output_dim_sizes.append(None)
-                        
-                elif 'block_size' in idx.name:
-                    # block_size indicates the tile size, compute offset
-                    if hasattr(self, 'current_loop_ivs') and i < len(self.current_loop_ivs):
-                        iv_ssa = self.current_loop_ivs[i]
-                    else:
-                        iv_ssa = f"%iv_block_{i}"
+                # Check if this index has a BlockSizeOrigin - if so, it represents a tile size
+                # and we need to compute offset as iv * block_size
+                block_id = self._try_get_block_id_from_node(idx)
+                
+                if block_id is not None:
+                    # This index represents a tile size (either block_size_X or sym_size_int with BlockSizeOrigin)
+                    # The offset comes from the corresponding loop IV
+                    iv_ssa = f"%iv_block_{block_id}"
                     
                     offset_ssa = self.mlir_output_helper.fresh("offset")
                     self.mlir_output_helper.emit(f'{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index')
