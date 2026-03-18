@@ -93,8 +93,8 @@ class TorchMLIRNodeImporter:
             module
         )
         
-        return str(module)
-    
+        return _rewrite_batch_matmul_f16_accumulation(str(module))
+
     def import_node(
         self,
         node: fx.Node,
@@ -208,8 +208,12 @@ def create_fake_tensors_for_node(node: fx.Node) -> list[torch.Tensor]:
             # Try to get existing val
             val = arg.meta.get("val")
             if isinstance(val, torch.Tensor):
-                fake = torch.empty(val.shape, dtype=val.dtype, device="meta")
-                fake_tensors.append(fake)
+                from torch._subclasses.fake_tensor import FakeTensor
+                if isinstance(val, FakeTensor):
+                    fake_tensors.append(val)
+                else:
+                    fake = torch.empty(val.shape, dtype=val.dtype, device="meta")
+                    fake_tensors.append(fake)
             elif isinstance(val, (int, float, bool)):
                 # For scalars, append the value itself
                 fake_tensors.append(val)
@@ -278,15 +282,283 @@ def import_aten_node_to_mlir(
 
 import re
 
+
+def _rewrite_batch_matmul_f16_accumulation(mlir_text: str) -> str:
+    """Rewrite linalg.matmul/batch_matmul(f16,f16)->f32+truncf to pure f16 accumulation.
+
+    torch-mlir lowers aten.mm/addmm/bmm/baddbmm with f16 inputs to mixed-precision:
+      matmul/batch_matmul with f32 accumulator, then a truncf linalg.generic.
+
+    This rewrites that pattern to use a pure f16 accumulator:
+      %cst   = arith.constant 0.000000e+00 : f32  ->  : f16
+      %empty = tensor.empty(...) : tensor<...xf32>  ->  : tensor<...xf16>
+      %fill  = linalg.fill ins(%cst : f32) ... -> f32  ->  f16
+      %mm    = linalg.matmul/batch_matmul ins(f16,f16) outs(f32) -> f32  ->  outs(f16) -> f16
+      %trunc = linalg.generic {truncf f32->f16} ...  ->  (removed, %trunc renamed to %mm)
+    """
+    if 'linalg.batch_matmul' not in mlir_text and 'linalg.matmul' not in mlir_text:
+        return mlir_text
+
+    lines = mlir_text.splitlines()
+
+    # Regex to match a matmul or batch_matmul line with f16 inputs and f32 outs
+    bmm_re = re.compile(
+        r'^(\s*)(%[\w.+-]+)\s*=\s*linalg\.(?:batch_matmul|matmul)\s+'
+        r'ins\((?:[^)]*xf16>[^)]*xf16>[^)]*)\)\s+'
+        r'outs\((%[\w.+-]+)\s*:\s*(tensor<[^>]+xf32>)\)\s*->\s*(tensor<[^>]+xf32>)\s*$'
+    )
+
+    result = list(lines)
+
+    for bmm_idx, line in enumerate(result):
+        m = bmm_re.match(line)
+        if not m:
+            continue
+
+        bmm_result = m.group(2)
+        bmm_outs_ssa = m.group(3)
+        f32_type = m.group(4)
+        f16_type = f32_type.replace('xf32>', 'xf16>')
+
+        # Find the linalg.fill that produced bmm_outs_ssa (search backwards)
+        fill_idx = None
+        fill_cst_ssa = None
+        fill_empty_ssa = None
+        fill_re = re.compile(
+            r'^\s*' + re.escape(bmm_outs_ssa) + r'\s*=\s*linalg\.fill\s+'
+            r'ins\((%[\w.+-]+)\s*:\s*f32\)\s+'
+            r'outs\((%[\w.+-]+)\s*:\s*' + re.escape(f32_type) + r'\)\s*->\s*' + re.escape(f32_type) + r'\s*$'
+        )
+        for j in range(bmm_idx - 1, -1, -1):
+            fm = fill_re.match(result[j])
+            if fm:
+                fill_idx = j
+                fill_cst_ssa = fm.group(1)
+                fill_empty_ssa = fm.group(2)
+                break
+        if fill_idx is None:
+            continue
+
+        # Find tensor.empty that produced fill_empty_ssa
+        empty_idx = None
+        empty_re = re.compile(
+            r'^\s*' + re.escape(fill_empty_ssa) + r'\s*=\s*tensor\.empty\([^)]*\)\s*:\s*' + re.escape(f32_type) + r'\s*$'
+        )
+        for j in range(fill_idx - 1, -1, -1):
+            if empty_re.match(result[j]):
+                empty_idx = j
+                break
+
+        # Find arith.constant f32 that produced fill_cst_ssa
+        const_idx = None
+        const_re = re.compile(
+            r'^\s*' + re.escape(fill_cst_ssa) + r'\s*=\s*arith\.constant\s+0\.000000e\+00\s*:\s*f32\s*$'
+        )
+        for j in range(fill_idx - 1, -1, -1):
+            if const_re.match(result[j]):
+                const_idx = j
+                break
+
+        # Find the truncf linalg.generic that consumes bmm_result (search forwards)
+        truncf_start = None
+        truncf_end = None
+        truncf_result = None
+        truncf_re = re.compile(
+            r'^\s*(%[\w.+-]+)\s*=\s*linalg\.generic\s*\{[^{}]*\}\s*'
+            r'ins\(' + re.escape(bmm_result) + r'\s*:[^)]*xf32>[^)]*\)\s*'
+            r'outs\([^)]*xf16>[^)]*\)\s*\{'
+        )
+        for j in range(bmm_idx + 1, len(result)):
+            tm = truncf_re.match(result[j])
+            if tm:
+                # Verify body contains arith.truncf
+                depth = result[j].count('{') - result[j].count('}')
+                k = j + 1
+                while k < len(result) and depth > 0:
+                    depth += result[k].count('{') - result[k].count('}')
+                    k += 1
+                body_text = '\n'.join(result[j:k])
+                if 'arith.truncf' in body_text:
+                    truncf_result = tm.group(1)
+                    truncf_start = j
+                    truncf_end = k - 1
+                break
+
+        if truncf_start is None:
+            continue
+
+        # Apply rewrites
+        # 1. Change arith.constant f32 -> f16
+        if const_idx is not None:
+            result[const_idx] = result[const_idx].replace(': f32', ': f16', 1)
+
+        # 2. Change tensor.empty f32 -> f16
+        if empty_idx is not None:
+            result[empty_idx] = result[empty_idx].replace(f32_type, f16_type, 1)
+
+        # 3. Change linalg.fill f32 -> f16 (all f32 in that line are the element type)
+        result[fill_idx] = result[fill_idx].replace('f32', 'f16')
+
+        # 4. Change batch_matmul outs f32 -> f16
+        result[bmm_idx] = result[bmm_idx].replace(f32_type, f16_type)
+
+        # 5. Remove truncf linalg.generic block
+        for k in range(truncf_start, truncf_end + 1):
+            result[k] = None
+
+        # 6. Rename all uses of truncf_result to bmm_result
+        if truncf_result:
+            for k in range(len(result)):
+                if result[k] is not None and truncf_result in result[k]:
+                    result[k] = re.sub(
+                        re.escape(truncf_result) + r'(?![\w.+-])',
+                        bmm_result,
+                        result[k]
+                    )
+
+        # Filter out removed lines
+        result = [l for l in result if l is not None]
+
+        # Recurse to handle any additional batch_matmuls
+        return _rewrite_batch_matmul_f16_accumulation('\n'.join(result))
+
+    return mlir_text
+
+
+def _rewrite_linalg_generic_scalars(
+    rhs: str,
+    scalar_arg_ssas: dict[str, str],
+    ssa_map: dict[str, str],
+    pending_scalar_bb_indices: list,
+) -> str:
+    """Rewrite a linalg.generic RHS to remove scalar operands from ins().
+
+    Scalar operands (identified by scalar_arg_ssas) are removed from the
+    ins() clause and their corresponding indexing_maps entries. The positions
+    of removed block args are recorded in pending_scalar_bb_indices so the
+    caller can skip them when processing the next ^bb0 line.
+
+    Args:
+        rhs: The RHS of the assignment (everything after '=').
+        scalar_arg_ssas: Maps original %argN names to scalar SSA values.
+        ssa_map: Current SSA name mapping (for resolving %argN -> operand SSA).
+        pending_scalar_bb_indices: Output list of (bb_position, scalar_ssa) tuples.
+
+    Returns:
+        Rewritten RHS with scalar operands removed from ins() and indexing_maps.
+    """
+    # Find ins(...) clause and parse its operands
+    ins_match = re.search(r'ins\(([^)]*)\)', rhs)
+    if not ins_match:
+        return rhs
+
+    ins_content = ins_match.group(1)
+    # ins content looks like: %arg0, %arg1 : tensor<?x?xf16>, tensor<f16>
+    if ':' not in ins_content:
+        return rhs
+
+    operands_part, types_part = ins_content.split(':', 1)
+    # Parse operand names (before the colon)
+    operand_names = [o.strip() for o in operands_part.split(',')]
+
+    # Parse type list (after the colon) - need to handle nested <> in types
+    type_strs = _split_mlir_types(types_part.strip())
+
+    if len(operand_names) != len(type_strs):
+        return rhs  # Can't parse, leave unchanged
+
+    # Identify which positions are scalar
+    scalar_positions = set()
+    for pos, op_name in enumerate(operand_names):
+        if op_name in scalar_arg_ssas:
+            scalar_positions.add(pos)
+            # The scalar is at position `pos` in ins(), which is also position
+            # `pos` in ^bb0 block args (outs args come after ins args).
+            scalar_ssa = scalar_arg_ssas[op_name]
+            pending_scalar_bb_indices.append((pos, scalar_ssa))
+
+    if not scalar_positions:
+        return rhs  # No scalars found
+
+    # Rebuild ins() without scalar entries
+    new_operands = []
+    new_types = []
+    for pos in range(len(operand_names)):
+        if pos not in scalar_positions:
+            new_operands.append(operand_names[pos])
+            new_types.append(type_strs[pos])
+
+    new_ins = f"ins({', '.join(new_operands)} : {', '.join(new_types)})"
+
+    # Remove corresponding indexing_maps entries
+    # indexing_maps has entries for: [ins_0, ins_1, ..., outs_0, outs_1, ...]
+    # We need to remove entries at the scalar positions
+    maps_match = re.search(r'indexing_maps\s*=\s*\[([^\]]*)\]', rhs)
+    if maps_match:
+        maps_content = maps_match.group(1)
+        # Split affine maps carefully (they contain commas inside <>)
+        map_entries = _split_affine_maps(maps_content)
+
+        new_map_entries = []
+        for pos, entry in enumerate(map_entries):
+            if pos not in scalar_positions:
+                new_map_entries.append(entry)
+
+        new_maps = f"indexing_maps = [{', '.join(new_map_entries)}]"
+        rhs = rhs[:maps_match.start()] + new_maps + rhs[maps_match.end():]
+
+    # Replace ins(...) in the (possibly already modified) rhs
+    ins_match = re.search(r'ins\([^)]*\)', rhs)
+    if ins_match:
+        rhs = rhs[:ins_match.start()] + new_ins + rhs[ins_match.end():]
+
+    return rhs
+
+
+def _split_mlir_types(types_str: str) -> list[str]:
+    """Split a comma-separated list of MLIR types, respecting nested <>.
+
+    Example: "tensor<?x?xf16>, tensor<f16>" -> ["tensor<?x?xf16>", "tensor<f16>"]
+    """
+    result = []
+    depth = 0
+    current = []
+    for ch in types_str:
+        if ch == '<':
+            depth += 1
+            current.append(ch)
+        elif ch == '>':
+            depth -= 1
+            current.append(ch)
+        elif ch == ',' and depth == 0:
+            result.append(''.join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        result.append(''.join(current).strip())
+    return result
+
+
+def _split_affine_maps(maps_str: str) -> list[str]:
+    """Split a comma-separated list of affine_map entries, respecting nested <>.
+
+    Example: "affine_map<(d0) -> (d0)>, affine_map<(d0) -> ()>"
+    -> ["affine_map<(d0) -> (d0)>", "affine_map<(d0) -> ()>"]
+    """
+    return _split_mlir_types(maps_str)  # Same parsing logic
+
+
 def inline_torch_mlir_output(
-    mlir_text: str, 
-    operands: list[str], 
+    mlir_text: str,
+    operands: list[str],
     mlir_output_helper,
     *,
     dimension_ssa_map: dict[str, list[str | None]] | None = None,
+    scalar_operand_map: dict[int, str] | None = None,
 ) -> str:
     """Inline torch-mlir generated text into the current output helper.
-    
+
     Handles multiline operations like linalg.generic which have block bodies:
     ```
     %3 = linalg.generic {...} ins(...) outs(...) {
@@ -295,7 +567,7 @@ def inline_torch_mlir_output(
       linalg.yield %4 : f32
     } -> tensor<32x64xf32>
     ```
-    
+
     Args:
         mlir_text: The full MLIR module text from torch-mlir.
         operands: SSA values to use as arguments.
@@ -306,7 +578,13 @@ def inline_torch_mlir_output(
             - str: Use this SSA value for the dimension
             - None: Dimension is static, cannot be queried (or let tensor.dim run)
             Example: {"%slice16": ["%block_size_0", "%block_size_1", None]}
-        
+        scalar_operand_map: Optional mapping from operand index to scalar SSA value.
+            Scalar operands are removed from linalg.generic ins() and their
+            corresponding block args are replaced with direct scalar SSA references
+            in the body. This matches the pattern where scalar constants are
+            captured directly in linalg.generic body rather than passed as
+            0-rank tensor ins() operands.
+
     Returns:
         The SSA value of the result.
     """
@@ -358,16 +636,27 @@ def inline_torch_mlir_output(
     for i, op in enumerate(operands):
         ssa_map[f"%arg{i}"] = op
         
+    # -------------------------------------------------------------------------
+    # Track scalar operands for linalg.generic body capture
+    # -------------------------------------------------------------------------
+    # When scalar_operand_map is provided, %argN values that correspond to
+    # scalar operands will be removed from linalg.generic ins() and their
+    # block args replaced with direct scalar SSA references in the body.
+    scalar_arg_ssas = {}  # original %argN -> scalar SSA value
+    if scalar_operand_map:
+        for idx, scalar_ssa in scalar_operand_map.items():
+            scalar_arg_ssas[f"%arg{idx}"] = scalar_ssa
+
     # Regex to identify SSAs
     ssa_pattern = re.compile(r'%([a-zA-Z0-9_][a-zA-Z0-9_.+-]*)')
-    
+
     def replace_ssas(text, mapping):
         def repl(m):
             name = m.group(1)
             full = f"%{name}"
             return mapping.get(full, full)
         return ssa_pattern.sub(repl, text)
-    
+
     # -------------------------------------------------------------------------
     # OPTIMIZATION: Deferred arith.constant emission for tensor.dim
     # -------------------------------------------------------------------------
@@ -401,7 +690,12 @@ def inline_torch_mlir_output(
             break
             
     result_ssa = None
-    
+
+    # Track which ^bb0 block arg positions to skip for scalar operands.
+    # Populated when processing a linalg.generic ins() line, consumed
+    # when processing the next ^bb0 line.
+    pending_scalar_bb_indices = []  # list of (position_in_bb0, scalar_ssa)
+
     # -------------------------------------------------------------------------
     # PASS 3: Process function body lines and rename SSA values
     # -------------------------------------------------------------------------
@@ -438,11 +732,26 @@ def inline_torch_mlir_output(
             if "(" in line and ")" in line:
                 pre, rest = line.split("(", 1)
                 args_part, post = rest.rsplit(")", 1)
-                
+
                 args_list = args_part.split(",")
+                # Build set of positions to skip (scalar operands)
+                skip_positions = {}
+                for pos, scalar_ssa in pending_scalar_bb_indices:
+                    skip_positions[pos] = scalar_ssa
+                pending_scalar_bb_indices.clear()
+
                 new_args_list = []
-                for arg_def in args_list:
+                for arg_idx, arg_def in enumerate(args_list):
                     arg_def = arg_def.strip()
+                    if arg_idx in skip_positions:
+                        # This block arg corresponds to a scalar operand.
+                        # Map it to the scalar SSA instead of creating a block arg.
+                        if ":" in arg_def:
+                            name_part, _ = arg_def.split(":", 1)
+                            name = name_part.strip()
+                            if name.startswith("%"):
+                                ssa_map[name] = skip_positions[arg_idx]
+                        continue  # Skip this block arg
                     if ":" in arg_def:
                         name_part, type_part = arg_def.split(":", 1)
                         name = name_part.strip()
@@ -454,7 +763,7 @@ def inline_torch_mlir_output(
                             new_args_list.append(arg_def)
                     else:
                         new_args_list.append(arg_def)
-                
+
                 new_line = f"{pre}({', '.join(new_args_list)}){post}"
             else:
                 new_line = line
@@ -574,9 +883,19 @@ def inline_torch_mlir_output(
                 else:
                     new_lhs = ", ".join(new_lhs_vars)
                 
+                # ---------------------------------------------------------
+                # Scalar operand rewriting for linalg.generic
+                # Remove scalar operands from ins() and indexing_maps,
+                # and track their ^bb0 block arg positions for removal.
+                # ---------------------------------------------------------
+                if scalar_arg_ssas and 'linalg.generic' in rhs and 'ins(' in rhs:
+                    rhs = _rewrite_linalg_generic_scalars(
+                        rhs, scalar_arg_ssas, ssa_map, pending_scalar_bb_indices
+                    )
+
                 new_rhs = replace_ssas(rhs, ssa_map)
                 new_rhs = replace_affine_maps(new_rhs)
-                
+
                 mlir_output_helper.emit(f"{new_lhs} = {new_rhs}")
             else:
                 # Not an SSA assignment, emit as-is with SSA replacement

@@ -68,7 +68,7 @@ def matmul(
         [m, n], dtype=torch.promote_types(x.dtype, y.dtype), device=x.device
     )
     for tile_m, tile_n in hl.tile([m, n]):
-        acc = hl.zeros([tile_m, tile_n], dtype=torch.float32)
+        acc = hl.zeros([tile_m, tile_n], dtype=torch.float16)
         for tile_k in hl.tile(k):
             acc = torch.addmm(acc, x[tile_m, tile_k], y[tile_k, tile_n])
         out[tile_m, tile_n] = epilogue(acc, (tile_m, tile_n))
@@ -119,8 +119,8 @@ def main() -> None:
     Main function to run autotuning (commented out) and correctness checks.
     """
     m, k, n = 4096, 512, 4096
-    x = torch.randn([m, k], device="cpu", dtype=torch.float32)
-    y = torch.randn([k, n], device="cpu", dtype=torch.float32)
+    x = torch.randn([m, k], dtype=torch.float16)
+    y = torch.randn([k, n], dtype=torch.float16)
     bound_kernel = matmul.bind((x, y))
 
     print_debug_info(bound_kernel)

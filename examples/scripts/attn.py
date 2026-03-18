@@ -36,17 +36,17 @@ def attention(
     k_view = k_in.reshape([-1, n_dim, head_dim]).transpose(1, 2)
     out = torch.empty_like(q_view)
     sm_scale = 1.0 / math.sqrt(head_dim)
-    qk_scale = sm_scale * 1.44269504
     for tile_b, tile_m in hl.tile([q_view.size(0), m_dim]):
-        m_i = hl.full([tile_b, tile_m], float("-inf"), dtype=torch.float32)
+        qk_scale_dev = hl.full([], sm_scale * 1.44269504, dtype=torch.float16)
+        m_i = hl.full([tile_b, tile_m], float("-inf"), dtype=torch.float16)
         l_i = torch.full_like(m_i, 1.0)
-        acc = hl.zeros([tile_b, tile_m, head_dim], dtype=torch.float32)
+        acc = hl.zeros([tile_b, tile_m, head_dim], dtype=torch.float16)
         q = q_view[tile_b, tile_m, :]
         for tile_n in hl.tile(v_view.size(1)):
             k = k_view[tile_b, :, tile_n]
             qk = torch.bmm(q, k)
-            m_ij = torch.maximum(m_i, torch.amax(qk, -1) * qk_scale)
-            qk = qk * qk_scale - m_ij[:, :, None]
+            m_ij = torch.maximum(m_i, torch.amax(qk, -1) * qk_scale_dev)
+            qk = qk * qk_scale_dev - m_ij[:, :, None]
             p = torch.exp2(qk)
             l_ij = torch.sum(p, -1)
             alpha = torch.exp2(m_i - m_ij)
@@ -63,9 +63,9 @@ def attention(
 
 
 def main() -> None:
-    q = torch.randn([32, 4096, 128])
-    k = torch.randn([32, 4096, 128])
-    v = torch.randn([32, 4096, 128])
+    q = torch.randn([32, 4096, 128], dtype=torch.float16)
+    k = torch.randn([32, 4096, 128], dtype=torch.float16)
+    v = torch.randn([32, 4096, 128], dtype=torch.float16)
     bound = attention.bind((q, k, v))
 
     print_debug_info(bound)

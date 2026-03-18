@@ -152,7 +152,7 @@ class LoweringContext:
                         mlir_type = self.compute_mlir_memref_type_from_fake_tensor(fake_tensor)
                         self.host_tensor_types[name] = mlir_type
     
-    def compute_mlir_type_from_fake_tensor(self, fake_tensor, dtype: str = "f32") -> str:
+    def compute_mlir_type_from_fake_tensor(self, fake_tensor) -> str:
         """Compute MLIR tensor type from a FakeTensor using origin-based logic.
         
         For each dimension:
@@ -162,15 +162,17 @@ class LoweringContext:
         
         Args:
             fake_tensor: A FakeTensor from node.meta['val']
-            dtype: Element type string (default "f32")
             
         Returns:
             MLIR tensor type string like "tensor<128x256xf32>" or "tensor<?x?xf32>"
         """
         from helion._compiler.variable_origin import BlockSizeOrigin
+        from .mlir_utils import torch_dtype_to_mlir_element_type
         
         if fake_tensor is None or not hasattr(fake_tensor, "shape"):
             raise RuntimeError("FakeTensor is None or does not have shape")
+            
+        dtype_str = torch_dtype_to_mlir_element_type(fake_tensor.dtype)
         
         host_function = self.bound_kernel.host_function
         shape_env = self.bound_kernel.env.shape_env
@@ -202,9 +204,9 @@ class LoweringContext:
                 # Unknown type - use dynamic
                 shape.append(None)
         
-        return format_tensor_type(shape, dtype)
+        return format_tensor_type(shape, dtype_str)
     
-    def compute_mlir_memref_type_from_fake_tensor(self, fake_tensor, dtype: str = "f32") -> str:
+    def compute_mlir_memref_type_from_fake_tensor(self, fake_tensor) -> str:
         """Compute MLIR memref type from a FakeTensor using origin-based logic.
         
         For each dimension:
@@ -214,15 +216,17 @@ class LoweringContext:
         
         Args:
             fake_tensor: A FakeTensor from node.meta['val']
-            dtype: Element type string (default "f32")
             
         Returns:
             MLIR memref type string like "memref<128x256xf32>" or "memref<?x?xf32>"
         """
         from helion._compiler.variable_origin import BlockSizeOrigin
+        from .mlir_utils import torch_dtype_to_mlir_element_type
         
         if fake_tensor is None or not hasattr(fake_tensor, "shape"):
             raise RuntimeError("FakeTensor is None or does not have shape")
+            
+        dtype_str = torch_dtype_to_mlir_element_type(fake_tensor.dtype)
         
         host_function = self.bound_kernel.host_function
         shape_env = self.bound_kernel.env.shape_env
@@ -254,7 +258,7 @@ class LoweringContext:
                 # Unknown type - use dynamic
                 shape.append(None)
         
-        return format_memref_type(shape, dtype)
+        return format_memref_type(shape, dtype_str)
     
     # -------------------------------------------------------------------------
     # Property methods - derive values from bound_kernel

@@ -149,8 +149,7 @@ def generate_mlir(
         else:
             # Symbolic size -> emit loom.sym
             builder.emit(
-                f'{ssa} = loom.sym '
-                f'@block_size_{block_id} : index'
+                f'{ssa} = "loom.sym"() {{symbol_ref = @block_size_{block_id}}} : () -> index'
             )
         block_size_ssa[block_id] = ssa
 

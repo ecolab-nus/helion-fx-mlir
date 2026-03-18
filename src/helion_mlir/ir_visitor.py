@@ -356,20 +356,37 @@ class IRVisitor:
     
     def visit_full(self, node: fx.Node) -> str:
         """Generate tensor.empty + linalg.fill for tensor initialization.
-        
+
         Replaces the custom helion.full with standard MLIR dialects:
         - tensor.empty to create an uninitialized tensor
         - linalg.fill to fill it with the specified value
-        
-        For special values like -inf, we emit arith.constant with IEEE 754 hex 
+
+        For 0-rank tensors (empty shape), emits a bare scalar arith.constant
+        instead, so downstream linalg.generic ops can capture it directly
+        in their body rather than as an ins() tensor operand.
+
+        For special values like -inf, we emit arith.constant with IEEE 754 hex
         representation.
         """
         import math
-        
+
         shape_nodes = node.args[0]  # List of FX nodes or values
         fill_value = node.args[1] if len(node.args) > 1 else 0.0
         dtype = node.args[2] if len(node.args) > 2 else torch.float32
-        
+
+        # Special case: 0-rank tensor -> emit bare scalar arith.constant
+        if len(shape_nodes) == 0:
+            dtype_str = torch_dtype_to_mlir_element_type(dtype) if dtype else "f32"
+            cst_ssa = self.mlir_output_helper.fresh("cst_scalar")
+            if isinstance(fill_value, float) and (math.isinf(fill_value) or math.isnan(fill_value)):
+                hex_val = self._get_hex_constant(fill_value, dtype_str)
+                self.mlir_output_helper.emit(f'{cst_ssa} = arith.constant {hex_val} : {dtype_str}')
+            else:
+                self.mlir_output_helper.emit(f'{cst_ssa} = arith.constant {fill_value} : {dtype_str}')
+            self.ctx.node_values[node.name] = cst_ssa
+            self.ctx.node_types[node.name] = dtype_str  # "f16", NOT "tensor<f16>"
+            return cst_ssa
+
         # Resolve shape to SSA values - integer literals need to become arith.constant
         shape_ssa = []
         for s in shape_nodes:
@@ -389,7 +406,7 @@ class IRVisitor:
         # This preserves concrete dimensions (e.g., 128 for head_dim) instead of using '?' for all
         fake_tensor = node.meta.get("val")
         if fake_tensor is not None and hasattr(fake_tensor, "shape"):
-            tensor_type = self.ctx.compute_mlir_type_from_fake_tensor(fake_tensor, dtype_str)
+            tensor_type = self.ctx.compute_mlir_type_from_fake_tensor(fake_tensor)
         else:
             raise RuntimeError(f"Cannot compute MLIR type for node {node.name}")
         
@@ -416,14 +433,7 @@ class IRVisitor:
         # Step 2: Emit fill value constant
         fill_val_ssa = self.mlir_output_helper.fresh("fill_val")
         if isinstance(fill_value, float) and (math.isinf(fill_value) or math.isnan(fill_value)):
-            # Handle special float values with IEEE 754 hex representation
-            if math.isinf(fill_value):
-                if fill_value < 0:
-                    hex_val = "0xFF800000"  # -inf for f32
-                else:
-                    hex_val = "0x7F800000"  # +inf for f32
-            else:
-                hex_val = "0x7FC00000"  # nan for f32
+            hex_val = self._get_hex_constant(fill_value, dtype_str)
             self.mlir_output_helper.emit(f'{fill_val_ssa} = arith.constant {hex_val} : {dtype_str}')
         else:
             # Regular float value
@@ -481,7 +491,7 @@ class IRVisitor:
         # This preserves concrete dimensions (e.g., 128 for head_dim) instead of using '?' for all
         fake_tensor = node.meta.get("val")
         if fake_tensor is not None and hasattr(fake_tensor, "shape"):
-            tensor_type = self.ctx.compute_mlir_type_from_fake_tensor(fake_tensor, dtype_str)
+            tensor_type = self.ctx.compute_mlir_type_from_fake_tensor(fake_tensor)
         else:
             raise RuntimeError(f"Cannot compute MLIR type for node {node.name}")
         
@@ -508,14 +518,7 @@ class IRVisitor:
         # Step 2: Emit fill value constant
         fill_val_ssa = self.mlir_output_helper.fresh("fill_val")
         if isinstance(fill_value, float) and (math.isinf(fill_value) or math.isnan(fill_value)):
-            # Handle special float values with IEEE 754 hex representation
-            if math.isinf(fill_value):
-                if fill_value < 0:
-                    hex_val = "0xFF800000"  # -inf for f32
-                else:
-                    hex_val = "0x7F800000"  # +inf for f32
-            else:
-                hex_val = "0x7FC00000"  # nan for f32
+            hex_val = self._get_hex_constant(fill_value, dtype_str)
             self.mlir_output_helper.emit(f'{fill_val_ssa} = arith.constant {hex_val} : {dtype_str}')
         else:
             # Regular float value
@@ -568,14 +571,25 @@ class IRVisitor:
                 num_loop_outputs = 1
         
         # ---------------------------------------------------------------------
-        # Collect all arguments and classify them:
+        # Collect all arguments and classify them using phi-node analysis:
         # - Read-only args: passed to the loop but NOT yielded back
         # - Loop-carried args (iter_args): yielded and updated each iteration
-        # 
-        # Convention: first args are read-only, last args are loop-carried
-        # Example: [tensor_read_only, acc1, acc2] with 2 outputs -> 
-        #          readonly=[tensor_read_only], iter_args=[acc1, acc2]
+        #
+        # We determine which args are loop-carried by scanning the _for_loop
+        # node's users for getitem -> _phi chains. An arg is loop-carried iff
+        # it appears as the init value (lhs) of a _phi node whose rhs is a
+        # getitem of this _for_loop's result.
         # ---------------------------------------------------------------------
+        import operator as op_module
+        iter_arg_names = set()
+        for user in node.users:
+            if user.target is op_module.getitem:
+                for phi_user in user.users:
+                    if hasattr(phi_user, 'target') and phi_user.target is hl_tracing_ops._phi:
+                        init_val = phi_user.args[0]
+                        if isinstance(init_val, fx.Node):
+                            iter_arg_names.add(init_val.name)
+
         all_args_info = []
         for i, a in enumerate(args):
             if isinstance(a, fx.Node):
@@ -583,17 +597,16 @@ class IRVisitor:
                 all_args_info.append((f"acc_iter{i}", ssa, a.name))
             else:
                 all_args_info.append((f"acc_iter{i}", str(a), None))
-        
-        # Split into loop-carried (last N that match output count) and read-only (first few)
-        # The convention is: first args are read-only, last args are loop-carried
-        if num_loop_outputs > 0 and num_loop_outputs < len(all_args_info):
-            # First (len - num_outputs) are read-only, rest are loop-carried
-            num_readonly = len(all_args_info) - num_loop_outputs
-            readonly_args_info = all_args_info[:num_readonly]
-            iter_args_info = all_args_info[num_readonly:]
-        else:
-            readonly_args_info = []
-            iter_args_info = all_args_info
+
+        # Classify based on phi analysis
+        readonly_args_info = []
+        iter_args_info = []
+        for info_tuple in all_args_info:
+            name, ssa, fx_name = info_tuple
+            if fx_name and fx_name in iter_arg_names:
+                iter_args_info.append(info_tuple)
+            else:
+                readonly_args_info.append(info_tuple)
         
         # Determine tensor type for iter_args from their initial values
         iter_args_types = []
@@ -630,37 +643,30 @@ class IRVisitor:
         self.mlir_output_helper.push()
         
         # Set up args inside loop - map placeholder names to appropriate SSA values
-        old_loop_iter_args = self.loop_iter_args.copy()
-        
-        # Get node_args from ForLoopGraphInfo if available
-        node_args = getattr(for_graph, 'node_args', [])
-        
-        # Map placeholders for read-only args (use original SSA value directly)
-        for i, (_, ssa, _) in enumerate(readonly_args_info):
-            placeholder_name = f"arg{i}_1"
-            self.loop_iter_args[placeholder_name] = ssa  # Use original SSA
-        
-        # Map placeholders for loop-carried iter_args
-        num_readonly = len(readonly_args_info)
-        for i, (iter_name, _, _) in enumerate(iter_args_info):
-            # Offset by number of read-only args
-            placeholder_name = f"arg{num_readonly + i}_1"
-            self.loop_iter_args[placeholder_name] = f"%{iter_name}"
-            
-            # Also map with different naming patterns used in Device IR
-            self.loop_iter_args[f"arg0_{num_readonly + i + 1}"] = f"%{iter_name}"
-        
-        # ---------------------------------------------------------------------
-        # Map placeholder names to SSA values for inner graph visiting.
-        # Device IR uses naming patterns like arg0_1, arg1_1, etc.
-        # We map these to either:
+        # Device IR uses naming patterns like arg0_1, arg1_1, etc. corresponding
+        # positionally to the args list. We map each placeholder to either:
         # - Read-only: original SSA from outer scope
         # - iter_args: the loop block argument SSA (%acc_iterN)
-        # ---------------------------------------------------------------------
-        if readonly_args_info:
-            self.loop_iter_args["arg0_1"] = readonly_args_info[0][1]  # First read-only
-        elif iter_args_info:
-            self.loop_iter_args["arg0_1"] = f"%{iter_args_info[0][0]}"  # First iter_arg
+        old_loop_iter_args = self.loop_iter_args.copy()
+
+        iter_arg_idx = 0
+        for i, a in enumerate(args):
+            placeholder_name = f"arg{i}_1"
+            if isinstance(a, fx.Node) and a.name in iter_arg_names:
+                # Loop-carried iter_arg -> map to block argument
+                iter_name = iter_args_info[iter_arg_idx][0]
+                self.loop_iter_args[placeholder_name] = f"%{iter_name}"
+                # Propagate type from init value to iter_arg placeholder
+                if a.name in self.ctx.node_types:
+                    self.ctx.node_types[placeholder_name] = self.ctx.node_types[a.name]
+                iter_arg_idx += 1
+            elif isinstance(a, fx.Node):
+                # Read-only -> use original SSA from outer scope
+                ssa = self.ctx.node_values.get(a.name, f"%{a.name}")
+                self.loop_iter_args[placeholder_name] = ssa
+                # Propagate type from outer scope to inner placeholder
+                if a.name in self.ctx.node_types:
+                    self.ctx.node_types[placeholder_name] = self.ctx.node_types[a.name]
 
         
         self.loop_depth += 1
@@ -831,7 +837,9 @@ class IRVisitor:
                     return value_str
         
         # Fallback: emit tensor.dim to get the dimension size
-        tensor_type = self._get_tensor_type(tensor_node) if isinstance(tensor_node, fx.Node) else f"tensor<?x?xf32>"
+        if not isinstance(tensor_node, fx.Node):
+            raise RuntimeError(f"Expected fx.Node for tensor_node, got {type(tensor_node)}: {tensor_node}")
+        tensor_type = self._get_tensor_type(tensor_node)
         
         dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
         self.mlir_output_helper.emit(f'{dim_idx_ssa} = arith.constant {dim} : index')
@@ -1069,8 +1077,10 @@ class IRVisitor:
         memref_ssa = self.ctx.node_values.get(tensor_node.name, f"%{tensor_node.name}")
         memref_type = self._get_tensor_type(tensor_node)  # Now returns memref type for host tensors
         
-        value_ssa = self.ctx.node_values.get(value.name, f"%{value.name}") if isinstance(value, fx.Node) else str(value)
-        value_type = self._get_tensor_type(value) if isinstance(value, fx.Node) else f"tensor<?x?xf32>"
+        if not isinstance(value, fx.Node):
+            raise RuntimeError(f"Expected fx.Node for value, got {type(value)}: {value}")
+        value_ssa = self.ctx.node_values.get(value.name, f"%{value.name}")
+        value_type = self._get_tensor_type(value)
         
         # Get FakeTensor from value node to determine tile sizes
         value_fake_tensor = value.meta.get("val") if isinstance(value, fx.Node) else None
@@ -1331,7 +1341,9 @@ class IRVisitor:
         tensor_node = node.args[0]
         indices = node.args[1] if len(node.args) > 1 else []
         
-        current_ssa = self.ctx.node_values.get(tensor_node.name, f"%{tensor_node.name}") if isinstance(tensor_node, fx.Node) else str(tensor_node)
+        if not isinstance(tensor_node, fx.Node):
+             raise RuntimeError(f"Expected fx.Node for tensor_node, got {type(tensor_node)}: {tensor_node}")
+        current_ssa = self.ctx.node_values.get(tensor_node.name, f"%{tensor_node.name}")
         source_type = self._get_tensor_type(tensor_node)
         
         # -----------------------------------------------------------
@@ -1402,14 +1414,15 @@ class IRVisitor:
                     
                     input_dim_idx += 1
             
-            # Count result dims to build type string
             res_rank = 0
             for idx in slice_indices:
                 if isinstance(idx, slice):
                     res_rank += 1
             
+            # Derive dtype from source FakeTensor
+            source_dtype = self._get_element_type_from_node(tensor_node)
             dims_str = "x".join(["?"] * res_rank)
-            result_type = f"tensor<{dims_str}xf32>"
+            result_type = f"tensor<{dims_str}x{source_dtype}>"
             extracted_type = result_type
             
             result_slice = self.mlir_output_helper.fresh("slice")
@@ -1503,8 +1516,10 @@ class IRVisitor:
                     result_dims.append("1")  # New dimensions from None are always size 1
                 else:
                     result_dims.append("?")  # Real dimensions are dynamic
+            
+            source_dtype = self._get_element_type_from_node(tensor_node)
             dims_str = "x".join(result_dims)
-            result_type = f"tensor<{dims_str}xf32>"
+            result_type = f"tensor<{dims_str}x{source_dtype}>"
             
             result_expand = self.mlir_output_helper.fresh("expand")
             
@@ -1667,17 +1682,37 @@ class IRVisitor:
             if any(d is not None for d in dim_ssas):
                 dimension_ssa_map[operand_ssa] = dim_ssas
         
+        # Identify scalar (non-tensor) operands so inline_torch_mlir_output
+        # can capture them directly in linalg.generic body instead of as
+        # ins() tensor operands.
+        scalar_operand_map = {}  # operand index -> scalar SSA value
+        for i, op_node in enumerate(tensor_operand_nodes):
+            if isinstance(op_node, fx.Node):
+                node_type = self.ctx.node_types.get(op_node.name, "")
+                if node_type and not node_type.startswith("tensor<") and not node_type.startswith("memref<"):
+                    scalar_operand_map[i] = tensor_operands[i]
+
         # Inline the generated MLIR with dimension optimization
         from .torch_mlir_helper import inline_torch_mlir_output
         result = inline_torch_mlir_output(
-            mlir_text, 
-            tensor_operands, 
+            mlir_text,
+            tensor_operands,
             self.mlir_output_helper,
-            dimension_ssa_map=dimension_ssa_map if dimension_ssa_map else None
+            dimension_ssa_map=dimension_ssa_map if dimension_ssa_map else None,
+            scalar_operand_map=scalar_operand_map if scalar_operand_map else None,
         )
         
         self.ctx.node_values[node.name] = result
         return result
+    
+    def _get_element_type_from_node(self, node: fx.Node) -> str:
+        """Extract MLIR element type string from a node's FakeTensor dtype."""
+        from .mlir_utils import torch_dtype_to_mlir_element_type
+        if isinstance(node, fx.Node):
+            fake = node.meta.get("val")
+            if fake is not None and hasattr(fake, "dtype"):
+                return torch_dtype_to_mlir_element_type(fake.dtype)
+        return "f32"  # Last-resort fallback
     
     def _get_tensor_type(self, tensor_node: fx.Node | str) -> str:
         """Get MLIR tensor type for a tensor node.
@@ -1713,3 +1748,38 @@ class IRVisitor:
             return self.ctx.compute_mlir_type_from_fake_tensor(fake_tensor)
         
         raise RuntimeError(f"Cannot compute MLIR type for node {name}")
+    
+    def _get_hex_constant(self, value: float, dtype_str: str) -> str:
+        """Get the hexadecimal representation of inf/nan for a given dtype.
+        
+        Args:
+            value: The float value (must be inf or nan)
+            dtype_str: The MLIR dtype string (f32, f16, bf16)
+            
+        Returns:
+            Hexadecimal string representation
+        """
+        import math
+        
+        if dtype_str == "f32":
+            if math.isinf(value):
+                return "0xFF800000" if value < 0 else "0x7F800000"
+            else:
+                return "0x7FC00000"
+        elif dtype_str == "f16":
+            if math.isinf(value):
+                return "0xFC00" if value < 0 else "0x7C00"
+            else:
+                return "0x7E00"
+        elif dtype_str == "bf16":
+            if math.isinf(value):
+                return "0xFF80" if value < 0 else "0x7F80"
+            else:
+                return "0x7FC0"
+        else:
+            # Fallback to f32 for unknown types, but warn?
+            # For now, just return what it would be for f32
+            if math.isinf(value):
+                return "0xFF800000" if value < 0 else "0x7F800000"
+            else:
+                return "0x7FC00000"
