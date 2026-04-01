@@ -141,15 +141,22 @@ def generate_mlir(
     block_size_ssa = {}
     for info in ctx.env.block_sizes:
         block_id = info.block_id
-        ssa = f"%block_size_{block_id}"
-        
+        sym_name = next(iter(info.debug_names), f"block_{block_id}")
+        ssa = f"%{sym_name}"
+
         if isinstance(info.size, int):
             # Concrete size -> no need to emit anything
             pass
         else:
-            # Symbolic size -> emit loom.sym
+            # Symbolic size -> emit loom.sym with debug name as symbol_ref
+            upper_bound = ctx.loop_extents[block_id]
+            is_reduction = str(info.reduction).lower()
             builder.emit(
-                f'{ssa} = "loom.sym"() {{symbol_ref = @block_size_{block_id}}} : () -> index'
+                f'{ssa} = "loom.sym"() {{'
+                f'symbol_ref = @{sym_name}, '
+                f'upper_bound = {upper_bound} : index, '
+                f'is_reduction = {is_reduction}'
+                f'}} : () -> index'
             )
         block_size_ssa[block_id] = ssa
 

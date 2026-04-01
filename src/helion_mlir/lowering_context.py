@@ -300,17 +300,23 @@ class LoweringContext:
         - loom.block_size_0, loom.block_size_1, ... = tile sizes for each block ID
         """
         attrs = {}
-        # Emit block sizes using block_id-based naming
+        # Emit block sizes using debug-name-based naming
         # Only emit for blocks with symbolic sizes (not concrete ints)
         for info in self.env.block_sizes:
             # Skip blocks with concrete int sizes - they're known constants
             if isinstance(info.size, int):
                 continue
-            
-            attr_name = f"loom.block_size_{info.block_id}"
-            # Use -1 for undefined/symbolic sizes
-            attrs[attr_name] = (-1, "index")
-        
+
+            sym_name = next(iter(info.debug_names), f"block_{info.block_id}")
+            upper_bound = self.loop_extents[info.block_id]
+            is_reduction = str(info.reduction).lower()
+            attr_name = f"loom.{sym_name}"
+            dict_val = (
+                f'{{upper_bound = {upper_bound} : index, '
+                f'is_reduction = {is_reduction}}}'
+            )
+            attrs[attr_name] = (dict_val, "")
+
         return attrs
     
 # -----------------------------------------------------------------------------
