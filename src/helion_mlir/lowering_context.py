@@ -335,7 +335,11 @@ class LoweringContext:
         """Resolve a block_id to its canonical (first-seen) equivalent."""
         return self.block_id_alias.get(block_id, block_id)
 
-    def get_module_attributes(self) -> dict[str, tuple[object, str]]:
+    def get_module_attributes(
+        self,
+        *,
+        used_canonical_ids: set[int] | None = None,
+    ) -> dict[str, tuple[object, str]]:
         """Get block sizes as module attributes.
 
         Only emits attributes for *canonical* blocks with symbolic sizes.
@@ -349,6 +353,11 @@ class LoweringContext:
             if isinstance(info.size, int):
                 continue
             canonical_id = alias.get(info.block_id, info.block_id)
+            if (
+                used_canonical_ids is not None
+                and canonical_id not in used_canonical_ids
+            ):
+                continue
             if canonical_id in seen_canonical:
                 continue
             seen_canonical.add(canonical_id)

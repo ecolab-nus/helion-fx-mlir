@@ -32,7 +32,6 @@ from .mlir_utils import (
 )
 from .lowering_context import (
     LoweringContext,
-    collect_reduction_block_ids,
 )
 from .ir_visitor import IRVisitor
 
@@ -105,10 +104,48 @@ def generate_mlir(
     grid_groups = ctx.all_grid_block_ids
     alias = ctx.block_id_alias
 
+    # Keep only inner graphs reachable from the selected roots.
+    import helion.language._tracing_ops as hl_tracing_ops
+
+    graph_lookup = {**root_graphs, **inner_graphs}
+    reachable_inner_ids: set[int] = set()
+    worklist: list[int] = [rid for rid in root_ids if rid in root_graphs]
+    visited_graphs: set[int] = set()
+
+    while worklist:
+        gid = worklist.pop()
+        if gid in visited_graphs:
+            continue
+        visited_graphs.add(gid)
+        ginfo = graph_lookup.get(gid)
+        if ginfo is None:
+            continue
+
+        for node in ginfo.graph.nodes:
+            if node.op != "call_function" or node.target is not hl_tracing_ops._for_loop:
+                continue
+            nested_gid = node.args[0]
+            if isinstance(nested_gid, int) and nested_gid in inner_graphs:
+                if nested_gid not in reachable_inner_ids:
+                    reachable_inner_ids.add(nested_gid)
+                worklist.append(nested_gid)
+
+    inner_graphs = {gid: g for gid, g in inner_graphs.items() if gid in reachable_inner_ids}
+
+    # Collect block IDs that are actually needed by emitted graphs.
+    used_block_ids: set[int] = set()
+    for grp in grid_groups:
+        used_block_ids.update(grp)
+    for ginfo in inner_graphs.values():
+        used_block_ids.update(getattr(ginfo, "block_ids", []))
+    used_canonical_block_ids: set[int] = {
+        ctx.resolve_block_id(bid) for bid in used_block_ids
+    }
+
     # ------------------------------------------------------------------
     # 3. Module header (block-size attributes)
     # ------------------------------------------------------------------
-    module_attrs = ctx.get_module_attributes()
+    module_attrs = ctx.get_module_attributes(used_canonical_ids=used_canonical_block_ids)
     if module_attrs:
         attr_strs = []
         for name, (value, typ) in module_attrs.items():
@@ -142,6 +179,8 @@ def generate_mlir(
 
     for info in ctx.env.block_sizes:
         canonical_id = alias.get(info.block_id, info.block_id)
+        if canonical_id not in used_canonical_block_ids:
+            continue
         if canonical_id in emitted_canonical:
             block_size_ssa[info.block_id] = block_size_ssa[canonical_id]
             continue
@@ -179,10 +218,12 @@ def generate_mlir(
     for grp in grid_groups:
         all_parallel_block_ids.update(grp)
 
-    reduction_block_ids = collect_reduction_block_ids(device_ir)
-    reduction_block_ids = [
-        bid for bid in reduction_block_ids if bid not in all_parallel_block_ids
-    ]
+    reduction_block_ids: list[int] = []
+    for ginfo in inner_graphs.values():
+        for bid in getattr(ginfo, "block_ids", []):
+            if bid in all_parallel_block_ids or bid in reduction_block_ids:
+                continue
+            reduction_block_ids.append(bid)
 
     for_trip_counts: dict[int, str] = {}
     for block_id in reduction_block_ids:
@@ -279,4 +320,3 @@ def generate_mlir(
             pass
 
     return mlir_text
-
