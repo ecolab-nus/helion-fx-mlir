@@ -12,6 +12,7 @@ The visitor dispatches to specific handlers based on the node's target:
 - aten.sym_size.int -> inline concrete value or tensor.dim
 - load -> memref.subview + bufferization.to_tensor
 - store -> bufferization.to_memref + memref.copy
+- atomic_add -> memref.subview + loom.sum
 - aten.* compute -> linalg-on-tensors (via torch-mlir)
 """
 
@@ -24,6 +25,7 @@ import torch.fx as fx
 from torch.ops import aten
 
 import helion.language.memory_ops as hl_memory_ops
+import helion.language.atomic_ops as hl_atomic_ops
 import helion.language._tracing_ops as hl_tracing_ops
 import helion.language.creation_ops as hl_creation_ops
 import helion.language.view_ops as hl_view_ops
@@ -187,6 +189,10 @@ class IRVisitor:
         # store -> tensor.insert_slice
         if target is hl_memory_ops.store:
             return self.visit_store(node)
+
+        # atomic_add -> memref.subview + loom.sum
+        if target is hl_atomic_ops.atomic_add:
+            return self.visit_atomic_add(node)
         
         # tile_id / tile_begin / tile_end -> IV-based SSA
         if target is hl_tile_ops.tile_id:
@@ -1255,6 +1261,166 @@ class IRVisitor:
         )
         
         # Store operations don't have a useful result, but register node for downstream reference
+        self.ctx.node_values[node.name] = subview_ssa
+        return subview_ssa
+
+    def visit_atomic_add(self, node: fx.Node) -> str:
+        """Generate memref.subview + loom.sum for atomic accumulation.
+
+        Requirements:
+        1. The atomic_add destination must be a host tensor (memref).
+        2. Lowering emits:
+           - memref.subview: computes the destination tile view (load-like indexing)
+           - loom.sum: accumulates the provided value into that subview
+        """
+        tensor_node = node.args[0]
+        indices = node.args[1]
+        value = node.args[2]
+
+        if not isinstance(tensor_node, fx.Node):
+            raise RuntimeError(
+                f"Expected fx.Node for atomic_add target, got {type(tensor_node)}: {tensor_node}"
+            )
+        if not isinstance(value, fx.Node):
+            raise RuntimeError(
+                f"Expected fx.Node for atomic_add value, got {type(value)}: {value}"
+            )
+
+        memref_ssa = self.ctx.node_values.get(tensor_node.name, f"%{tensor_node.name}")
+        memref_type = self._get_tensor_type(tensor_node)
+        if not memref_type.startswith("memref<"):
+            raise RuntimeError(
+                f"hl.atomic_add target must be a host tensor (memref), got {memref_type} "
+                f"for node {tensor_node.name}"
+            )
+
+        value_ssa = self.ctx.node_values.get(value.name, f"%{value.name}")
+        value_type = self._get_tensor_type(value)
+
+        # Build subview access pattern using the same indexing strategy as visit_load:
+        # - BlockSize-origin index => offset = iv * block_size, size = block_size
+        # - Scalar index => size = 1
+        # - Full slice => offset = 0, size = source dim
+        offsets = []
+        sizes = []
+        output_dim_sizes = []
+
+        def parse_memref_dimensions(type_str: str) -> list[str]:
+            if "memref<" in type_str and ">" in type_str:
+                content = type_str[type_str.find("<") + 1 : type_str.rfind(">")]
+                if "," in content:
+                    content = content.split(",")[0]
+                if "x" in content:
+                    return content.split("x")[:-1]
+            return []
+
+        src_dims = parse_memref_dimensions(memref_type)
+
+        for i, idx in enumerate(indices):
+            if isinstance(idx, slice):
+                offsets.append(("0", True))
+
+                src_dim_static = None
+                if i < len(src_dims):
+                    if src_dims[i] != "?":
+                        try:
+                            src_dim_static = int(src_dims[i])
+                        except ValueError:
+                            pass
+
+                if src_dim_static is not None:
+                    sizes.append((str(src_dim_static), True))
+                else:
+                    dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
+                    self.mlir_output_helper.emit(f"{dim_idx_ssa} = arith.constant {i} : index")
+                    dim_ssa = self.mlir_output_helper.fresh("dim")
+                    self.mlir_output_helper.emit(
+                        f"{dim_ssa} = memref.dim {memref_ssa}, {dim_idx_ssa} : {memref_type}"
+                    )
+                    sizes.append((dim_ssa, False))
+                output_dim_sizes.append(src_dim_static)
+
+            elif isinstance(idx, fx.Node):
+                idx_ssa = self.ctx.node_values.get(idx.name, f"%{idx.name}")
+                block_id = self._try_get_block_id_from_node(idx)
+                if block_id is not None:
+                    iv_ssa = f"%iv_block_{block_id}"
+                    offset_ssa = self.mlir_output_helper.fresh("offset")
+                    self.mlir_output_helper.emit(
+                        f"{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index"
+                    )
+                    offsets.append((offset_ssa, False))
+                    sizes.append((idx_ssa, False))
+                    output_dim_sizes.append(None)
+                else:
+                    offsets.append((idx_ssa, False))
+                    sizes.append(("1", True))
+                    output_dim_sizes.append(1)
+
+            elif isinstance(idx, int):
+                offsets.append((str(idx), True))
+                sizes.append(("1", True))
+                output_dim_sizes.append(1)
+            else:
+                raise RuntimeError(f"Unsupported atomic_add index type: {type(idx)}")
+
+        content = memref_type[memref_type.find("<") + 1 : memref_type.rfind(">")]
+        if "," in content:
+            content = content.split(",")[0]
+        if "x" in content:
+            dtype_str = content.split("x")[-1]
+        else:
+            dtype_str = content
+
+        output_dims = []
+        for dim_size in output_dim_sizes:
+            if dim_size is not None:
+                output_dims.append(str(dim_size))
+            else:
+                output_dims.append("?")
+
+        def compute_strides_from_dims(dims: list[str]) -> list[int] | None:
+            try:
+                int_dims = [int(d) for d in dims]
+            except ValueError:
+                return None
+
+            strides = []
+            product = 1
+            for d in reversed(int_dims):
+                strides.append(product)
+                product *= d
+            return list(reversed(strides))
+
+        src_strides = compute_strides_from_dims(src_dims)
+        has_dynamic_offset = any(not is_static for _, is_static in offsets)
+
+        if output_dims:
+            if src_strides is not None and has_dynamic_offset:
+                strides_layout = ", ".join(str(s) for s in src_strides)
+                subview_type = (
+                    f"memref<{'x'.join(output_dims)}x{dtype_str}, "
+                    f"strided<[{strides_layout}], offset: ?>>"
+                )
+            else:
+                subview_type = f"memref<{'x'.join(output_dims)}x{dtype_str}>"
+        else:
+            subview_type = f"memref<{dtype_str}>"
+
+        offsets_str = ", ".join(v for v, _ in offsets)
+        sizes_str = ", ".join(v for v, _ in sizes)
+        strides_str = ", ".join(["1"] * len(indices))
+
+        subview_ssa = self.mlir_output_helper.fresh("subview")
+        self.mlir_output_helper.emit(
+            f"{subview_ssa} = memref.subview {memref_ssa}[{offsets_str}][{sizes_str}][{strides_str}] : "
+            f"{memref_type} to {subview_type}"
+        )
+
+        self.mlir_output_helper.emit(
+            f'"loom.sum"({subview_ssa}, {value_ssa}) : ({subview_type}, {value_type}) -> ()'
+        )
+
         self.ctx.node_values[node.name] = subview_ssa
         return subview_ssa
     

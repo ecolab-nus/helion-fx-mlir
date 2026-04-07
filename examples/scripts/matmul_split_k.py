@@ -50,17 +50,12 @@ def split_k_matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     m, k = a.shape
     _, n = b.shape
-    tmp = torch.zeros((m, n, k), device=a.device, dtype=a.dtype)
+    #tmp = torch.zeros((m, n, k), device=a.device, dtype=a.dtype)
     out = torch.empty((m, n), device=a.device, dtype=a.dtype)
 
     for tile_m, tile_n, tile_k in hl.tile([m, n, k]):
         acc = torch.mm(a[tile_m, tile_k], b[tile_k, tile_n])
-        tmp[tile_m, tile_n, tile_k.id] = acc
-
-    hl.barrier()
-
-    for tile_m, tile_n in hl.tile([m, n]):
-        out[tile_m, tile_n] = torch.sum(tmp[tile_m, tile_n, :], dim=-1)
+        hl.atomic_add(out, [tile_m, tile_n], acc)
 
     return out
 
