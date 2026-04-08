@@ -6,7 +6,7 @@ corresponding MLIR operation:
 
 - _get_symnode -> SSA lookup via Origin (BlockSizeOrigin -> block_size_ssa)
 - full -> tensor.empty + linalg.fill
-- _for_loop -> affine.for + recursive visit
+- _for_loop -> scf.for + recursive visit
 - _phi -> Loop result SSA (simplified merge pattern detection)
 - _host_tensor -> function argument mapping
 - aten.sym_size.int -> inline concrete value or tensor.dim
@@ -40,6 +40,18 @@ if TYPE_CHECKING:
 
 from .debug_utils import run_dce_cleanup
 
+
+def _emit_index_ceildiv(
+    builder,
+    lhs: str,
+    rhs: str,
+    *,
+    result_hint: str = "trip_count",
+) -> str:
+    """Emit ceildiv on index values without affine.apply."""
+    result = builder.fresh(result_hint)
+    builder.emit(f"{result} = arith.ceildivui {lhs}, {rhs} : index")
+    return result
 
 
 def generate_mlir(
@@ -239,15 +251,18 @@ def generate_mlir(
         info = ctx.env.block_sizes[block_id]
         total_extent = ctx.get_loop_extent_or_hint(block_id)
 
-        trip_count_ssa = builder.fresh("trip_count")
         if isinstance(info.size, int):
+            trip_count_ssa = builder.fresh("trip_count")
             trip_count = max(1, math.ceil(total_extent / info.size))
             builder.emit(f'{trip_count_ssa} = arith.constant {trip_count} : index')
         else:
             tile_size_ssa = block_size_ssa[canonical_id]
-            builder.emit(
-                f'{trip_count_ssa} = affine.apply '
-                f'affine_map<()[s0] -> ({total_extent} ceildiv s0)>()[{tile_size_ssa}]'
+            total_extent_ssa = builder.fresh("loop_extent")
+            builder.emit(f"{total_extent_ssa} = arith.constant {total_extent} : index")
+            trip_count_ssa = _emit_index_ceildiv(
+                builder,
+                total_extent_ssa,
+                tile_size_ssa,
             )
         for_trip_counts[block_id] = trip_count_ssa
 
@@ -280,10 +295,12 @@ def generate_mlir(
                 ub_ssas.append(ssa)
             else:
                 size_ssa = block_size_ssa[canonical_id]
-                trip_ssa = builder.fresh("trip_count")
-                builder.emit(
-                    f'{trip_ssa} = affine.apply '
-                    f'affine_map<()[s0] -> ({total_extent} ceildiv s0)>()[{size_ssa}]'
+                total_extent_ssa = builder.fresh("loop_extent")
+                builder.emit(f"{total_extent_ssa} = arith.constant {total_extent} : index")
+                trip_ssa = _emit_index_ceildiv(
+                    builder,
+                    total_extent_ssa,
+                    size_ssa,
                 )
                 ub_ssas.append(trip_ssa)
 

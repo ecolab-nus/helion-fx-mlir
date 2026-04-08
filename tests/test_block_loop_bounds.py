@@ -58,18 +58,20 @@ def test_expression_bound_uses_scf_for() -> None:
     mlir_text = generate_mlir(bound_kernel)
 
     assert "scf.for" in mlir_text
+    assert "affine.apply" not in mlir_text
     result = validate_with_mlir_opt(mlir_text)
     assert result.returncode == 0, result.stderr
 
 
-def test_simple_bound_keeps_affine_for() -> None:
+def test_simple_bound_uses_scf_for_without_affine_apply() -> None:
     x = torch.randn([128, 64], dtype=torch.float16)
     y = torch.randn([64, 128], dtype=torch.float16)
 
     bound_kernel = matmul.bind((x, y))
     mlir_text = generate_mlir(bound_kernel)
 
-    assert "affine.for" in mlir_text
+    assert "scf.for" in mlir_text
+    assert "affine.apply" not in mlir_text
     result = validate_with_mlir_opt(mlir_text)
     assert result.returncode == 0, result.stderr
 

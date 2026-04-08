@@ -6,7 +6,7 @@ to MLIR by walking FX graph nodes instruction-by-instruction.
 The visitor dispatches to specific handlers based on the node's target:
 - _get_symnode -> SSA lookup via Origin (BlockSizeOrigin -> block_size_ssa)
 - full -> tensor.empty + linalg.fill
-- _for_loop -> affine.for + recursive visit
+- _for_loop -> scf.for + recursive visit
 - _phi -> Loop result SSA (simplified merge pattern detection)
 - _host_tensor -> function argument mapping
 - aten.sym_size.int -> inline concrete value or tensor.dim
@@ -165,7 +165,7 @@ class IRVisitor:
         if target is hl_creation_ops.full:
             return self.visit_full(node)
         
-        # _for_loop -> affine.for + recursive visit
+        # _for_loop -> scf.for + recursive visit
         if target is hl_tracing_ops._for_loop:
             return self.visit_for_loop(node)
 
@@ -663,6 +663,22 @@ class IRVisitor:
         self.mlir_output_helper.emit(f"{ssa} = arith.constant {int(value)} : index")
         return ssa
 
+    def _emit_index_divui(self, lhs: str, rhs: str, *, hint: str = "idx_div") -> str:
+        result = self.mlir_output_helper.fresh(hint)
+        self.mlir_output_helper.emit(f"{result} = arith.divui {lhs}, {rhs} : index")
+        return result
+
+    def _emit_index_ceildivui(
+        self,
+        lhs: str,
+        rhs: str,
+        *,
+        hint: str = "idx_ceildiv",
+    ) -> str:
+        result = self.mlir_output_helper.fresh(hint)
+        self.mlir_output_helper.emit(f"{result} = arith.ceildivui {lhs}, {rhs} : index")
+        return result
+
     def _as_index_ssa(self, value: Any) -> str:
         """Materialize an index-typed SSA value from literals/SymInt/FX nodes."""
         if isinstance(value, fx.Node):
@@ -722,9 +738,7 @@ class IRVisitor:
         elif op_name == "mul":
             self.mlir_output_helper.emit(f"{result} = arith.muli {lhs}, {rhs} : index")
         else:
-            self.mlir_output_helper.emit(
-                f"{result} = affine.apply affine_map<(d0)[s0] -> (d0 floordiv s0)>({lhs})[{rhs}]"
-            )
+            result = self._emit_index_divui(lhs, rhs, hint=node.name.replace(".", "_"))
 
         self.ctx.node_values[node.name] = result
         self.ctx.node_types[node.name] = "index"
@@ -743,17 +757,9 @@ class IRVisitor:
         self.ctx.node_types[node.name] = "index"
         return base_ssa
 
-    def _is_simple_affine_bound_expr(self, expr: Any) -> bool:
-        """Whether an FX loop bound is simple enough to keep affine.for."""
-        if isinstance(expr, (int, bool)):
-            return True
-        if not isinstance(expr, fx.Node):
-            return False
-        return expr.target in {hl_tracing_ops._get_symnode, aten.sym_size.int}
-
     def _derive_trip_count_from_for_loop_args(
         self, node: fx.Node, canonical_block_id: int
-    ) -> tuple[str, bool] | None:
+    ) -> str | None:
         """Primary path: derive loop trip count from FX _for_loop bounds."""
         if len(node.args) < 3:
             return None
@@ -794,15 +800,15 @@ class IRVisitor:
             if tile_size_ssa is None:
                 return None
 
-        trip_count_ssa = self.mlir_output_helper.fresh("trip_count")
-        self.mlir_output_helper.emit(
-            f"{trip_count_ssa} = affine.apply "
-            f"affine_map<(d0)[s0] -> (d0 ceildiv s0)>({ub_ssa})[{tile_size_ssa}]"
+        trip_count_ssa = self._emit_index_ceildivui(
+            ub_ssa,
+            tile_size_ssa,
+            hint="trip_count",
         )
-        return trip_count_ssa, self._is_simple_affine_bound_expr(ub)
+        return trip_count_ssa
 
     def visit_for_loop(self, node: fx.Node) -> str:
-        """Generate affine.for or scf.for and visit inner ForLoopGraphInfo."""
+        """Generate scf.for and visit the inner ForLoopGraphInfo."""
         graph_id = node.args[0]
         args = node.args[3]   # [acc]
 
@@ -817,14 +823,11 @@ class IRVisitor:
 
         # Primary path: derive trip count from _for_loop FX bounds.
         # Fallback path: use pre-computed metadata trip count.
-        derived = self._derive_trip_count_from_for_loop_args(node, block_id)
-        if derived is not None:
-            trip_count_ssa, use_affine_loop = derived
-        else:
+        trip_count_ssa = self._derive_trip_count_from_for_loop_args(node, block_id)
+        if trip_count_ssa is None:
             trip_count_ssa = self.ctx.reduction_trip_counts.get(block_id)
-            if trip_count_ssa is None:
-                raise ValueError("No trip count found for loop")
-            use_affine_loop = True
+        if trip_count_ssa is None:
+            raise ValueError("No trip count found for loop")
 
         # ---------------------------------------------------------------------
         # Collect all arguments and classify them using phi-node analysis:
@@ -882,20 +885,13 @@ class IRVisitor:
         num_results = len(iter_args_info)
         result_binding = f"{result}:{num_results}" if num_results > 1 else result
 
-        if use_affine_loop:
-            self.mlir_output_helper.emit(
-                f"{result_binding} = affine.for {iv} = 0 to {trip_count_ssa} "
-                f"iter_args({iter_args_str}) -> ({result_types}) {{"
-            )
-            yield_op = "affine.yield"
-        else:
-            c0 = self._emit_index_constant(0)
-            c1 = self._emit_index_constant(1)
-            self.mlir_output_helper.emit(
-                f"{result_binding} = scf.for {iv} = {c0} to {trip_count_ssa} step {c1} "
-                f"iter_args({iter_args_str}) -> ({result_types}) {{"
-            )
-            yield_op = "scf.yield"
+        c0 = self._emit_index_constant(0)
+        c1 = self._emit_index_constant(1)
+        self.mlir_output_helper.emit(
+            f"{result_binding} = scf.for {iv} = {c0} to {trip_count_ssa} step {c1} "
+            f"iter_args({iter_args_str}) -> ({result_types}) {{"
+        )
+        yield_op = "scf.yield"
         self.mlir_output_helper.push()
 
         old_loop_iter_args = self.loop_iter_args.copy()
@@ -972,7 +968,7 @@ class IRVisitor:
         """Handle phi nodes for loop-carried value merging.
         
         For Helion Device IR, _phi merges the initial value with the loop result.
-        Since MLIR's affine.for already handles iter_args merge semantics,
+        Since MLIR loop iter_args already handle merge semantics,
         we simply pass through the loop result SSA.
         
         Pattern detected:
@@ -1009,7 +1005,7 @@ class IRVisitor:
                     # Even if not in args, treat as loop merge for now
         
         if is_loop_merge and loop_result_ssa is not None:
-            # No helion.phi needed - MLIR's affine.for handles the merge
+            # No helion.phi needed - MLIR's loop iter_args handle the merge
             # Just pass through the loop result
             self.ctx.node_values[node.name] = loop_result_ssa
             if isinstance(rhs, fx.Node):
@@ -1750,7 +1746,7 @@ class IRVisitor:
     def visit_getitem(self, node: fx.Node) -> str:
         """Map getitem to the corresponding loop result.
         
-        For multi-value affine.for loops, getitem(_for_loop, i) extracts
+        For multi-value lowered loops, getitem(_for_loop, i) extracts
         the i-th return value as %result#i syntax.
         """
         source = node.args[0]
