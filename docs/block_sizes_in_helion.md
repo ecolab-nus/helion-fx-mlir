@@ -239,6 +239,80 @@ For MLIR symbol emission:
 
 > **Note**: When a block has a concrete `size` (e.g., from `hl.specialize(head_dim)` or `block_size=64`), the MLIR generator emits `arith.constant` instead of `loom.get_symbol`. This enables more optimization opportunities in downstream passes.
 
+### Translation of `tile.begin` / `tile.end` / `tile.id` / `tile.index`
+
+In Helion FX graphs, these appear as calls in `helion.language.tile_ops`. During MLIR lowering, they map to index SSA values using canonical block IDs.
+
+| Helion value | MLIR meaning | Typical lowering |
+|--------------|--------------|------------------|
+| `tile.id` | Tile coordinate (loop-space index) | `%iv_block_<canonical_id>` |
+| `tile.begin` | First element index of current tile | `%tile_begin = arith.muli %iv_block_<id>, %tile_size_<id> : index` |
+| `tile.end` | One-past-end element index of current tile | `%tile_end = (%iv_block_<id> + 1) * %tile_size_<id>` |
+| `tile.index` | Contiguous element indices inside a tile | Lowered as a base+range pattern used by load/store subviews |
+
+Notes:
+- `%iv_block_<id>` comes from `affine.parallel` (grid loops) or `affine.for`/`scf.for` (block loops).
+- `%tile_size_<id>` is either a symbolic SSA (from `loom.sym`) or an `arith.constant` for fixed/specialized sizes.
+- Block IDs are resolved through aliasing (`ctx.resolve_block_id`) so equivalent dimensions across grid groups share the same IV and block-size SSA.
+
+#### `tile.id`
+
+`tile.id(block_size_X)` lowers to the corresponding loop IV directly:
+
+```mlir
+// tile_m.id
+%tile_id = %iv_block_0
+```
+
+#### `tile.begin`
+
+`tile.begin(block_size_X)` lowers to `iv * tile_size`:
+
+```mlir
+%tile_begin = arith.muli %iv_block_0, %tile_m : index
+```
+
+This is the value used as a memref/tensor subview offset for that dimension.
+
+#### `tile.end`
+
+`tile.end(block_size_X)` lowers to `(iv + 1) * tile_size`:
+
+```mlir
+%c1 = arith.constant 1 : index
+%iv_plus_one = arith.addi %iv_block_0, %c1 : index
+%tile_end = arith.muli %iv_plus_one, %tile_m : index
+```
+
+#### `tile.index`
+
+`tile.index` is not emitted as an explicit vector SSA directly in this lowering.
+Instead, it is translated through the common indexing pattern:
+
+```python
+tile.index + base
+```
+
+which becomes a contiguous range:
+
+```text
+[base, base + tile_size)
+```
+
+and is consumed by `hl.load` / `hl.store` / `hl.atomic_add` lowering as:
+- subview offset = `base`
+- subview size = `tile_size` for that block
+
+Example pattern from `mamba_chunk_scan`:
+
+```python
+tile_c.begin * chunk_size + tile_k.index
+```
+
+is lowered so the sequence dimension subview uses:
+- offset = `%tile_c_begin * %chunk_size`
+- size = `%tile_k` (tile size for `k`)
+
 ---
 
 ## Multi-Grid Kernels and Block Size Aliasing
