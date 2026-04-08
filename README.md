@@ -86,6 +86,7 @@ src/helion_mlir/
 ```
 
 For detailed architecture, FX graph structure, and lowering internals, see [Software Architecture](docs/software_architecture.md).
+For expression-based block-loop bound lowering details (including `mamba_chunk_scan`), see [Block Loop Bounds Lowering README](docs/block_loop_bounds_lowering_readme.md).
 
 
 ## Validation

@@ -78,21 +78,10 @@ class LoweringContext:
         # Build loop extents from block sizes
         # Key: block_id, Value: concrete extent (from shape_env)
         self.loop_extents: dict[int, int] = {}
-        shape_env = bound_kernel.env.shape_env
-        
         for info in bound_kernel.env.block_sizes:
-            size = info.size
-            if isinstance(size, int):
-                self.loop_extents[info.block_id] = size
-            elif isinstance(size, torch.SymInt):
-                # Look up concrete value in shape_env
-                sym = size._sympy_()
-                if sym in shape_env.var_to_val:
-                    self.loop_extents[info.block_id] = int(shape_env.var_to_val[sym])
-                else:
-                    raise RuntimeError(f"Cannot resolve extent for block {info.block_id}")
-            else:
-                raise RuntimeError(f"Unsupported size type: {type(size)} for block {info.block_id}")
+            extent = self._resolve_block_extent(info)
+            if extent is not None:
+                self.loop_extents[info.block_id] = extent
         
         # Mutable state that gets populated during lowering
         self.host_tensors: dict[str, str] = {}
@@ -116,6 +105,47 @@ class LoweringContext:
         # Maps tensor name -> MLIR type string (e.g., "tensor<128x128xf32>")
         self.host_tensor_types: dict[str, str] = {}
         self._precompute_host_tensor_types()
+
+    def _resolve_block_extent(self, info: Any) -> int | None:
+        """Resolve concrete extent for one block if possible."""
+        shape_env = self.bound_kernel.env.shape_env
+        size = info.size
+
+        if isinstance(size, int):
+            return int(size)
+
+        if hasattr(size, "_sympy_"):
+            size_sym = size._sympy_()
+            if size_sym in shape_env.var_to_val:
+                return int(shape_env.var_to_val[size_sym])
+
+        var = getattr(info, "var", None)
+        if var is not None and hasattr(var, "_sympy_"):
+            var_sym = var._sympy_()
+            if var_sym in shape_env.var_to_val:
+                return int(shape_env.var_to_val[var_sym])
+
+        return None
+
+    def get_loop_extent(self, block_id: int) -> int | None:
+        """Return resolved block extent, if available."""
+        return self.loop_extents.get(block_id)
+
+    def get_loop_extent_or_hint(self, block_id: int, default: int = 1) -> int:
+        """Return resolved block extent, or a conservative hint."""
+        extent = self.get_loop_extent(block_id)
+        if extent is not None:
+            return extent
+
+        info = self.block_sizes.get(block_id)
+        if info is None:
+            return default
+
+        with self.env:
+            try:
+                return int(info.size_hint())
+            except Exception:
+                return default
     
     def _precompute_host_tensor_types(self) -> None:
         """Pre-compute MLIR types for all _host_tensor nodes by scanning all graphs.
@@ -363,7 +393,9 @@ class LoweringContext:
             seen_canonical.add(canonical_id)
 
             sym_name = next(iter(info.debug_names), f"block_{canonical_id}")
-            upper_bound = self.loop_extents[info.block_id]
+            upper_bound = self.get_loop_extent(info.block_id)
+            if upper_bound is None:
+                continue
             is_reduction = str(info.reduction).lower()
             attr_name = f"loom.{sym_name}"
             dict_val = (

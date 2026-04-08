@@ -18,6 +18,7 @@ The visitor dispatches to specific handlers based on the node's target:
 
 from __future__ import annotations
 
+import operator
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -71,6 +72,8 @@ class IRVisitor:
         self.current_loop_result: str | list[str] | None = None  # Set by inner graph output
         self.loop_depth: int = 0  # Depth tracking for nested loops
         self.current_block_id: int | None = None  # Current loop's block_id for IV reference
+        # Nodes representing contiguous 1-D index ranges (tile_index-based patterns)
+        self.range_index_block_ids: dict[str, int] = {}
     
     def resolve_dimension(self, dim_size, dim_hint: int = 0) -> tuple[str, bool]:
         """Resolve a dimension size to an SSA value or inline literal.
@@ -165,6 +168,14 @@ class IRVisitor:
         # _for_loop -> affine.for + recursive visit
         if target is hl_tracing_ops._for_loop:
             return self.visit_for_loop(node)
+
+        # hl.dot -> linalg.matmul
+        if hasattr(target, "__name__") and target.__name__ == "dot":
+            return self.visit_dot(node)
+
+        # Python builtin/operator symbolic arithmetic on index values
+        if self._is_python_index_arith_target(target):
+            return self.visit_python_index_arith(node)
         
         # _phi -> helion.phi
         if target is hl_tracing_ops._phi:
@@ -195,12 +206,20 @@ class IRVisitor:
             return self.visit_atomic_add(node)
         
         # tile_id / tile_begin / tile_end -> IV-based SSA
+        if target is hl_tile_ops.tile_index:
+            return self.visit_tile_index(node)
         if target is hl_tile_ops.tile_id:
             return self.visit_tile_id(node)
         if target is hl_tile_ops.tile_begin:
             return self.visit_tile_begin(node)
         if target is hl_tile_ops.tile_end:
             return self.visit_tile_end(node)
+
+        # Special indexing pattern: aten.add(tile_index(...), base_index)
+        if target is aten.add.Tensor:
+            maybe_index_base = self.visit_tile_index_add(node)
+            if maybe_index_base is not None:
+                return maybe_index_base
 
         # _mask_to -> shortcircuit (pass through input, boundary check placeholder)
         if target is hl_tracing_ops._mask_to:
@@ -216,7 +235,6 @@ class IRVisitor:
             return self.visit_getitem(node)
         
         # Check for operator.getitem
-        import operator
         if target is operator.getitem:
             return self.visit_getitem(node)
         
@@ -224,8 +242,10 @@ class IRVisitor:
         if target is aten.full.default:
             return self.visit_aten_full(node)
         
-        # aten.* compute operations - emit via torch-mlir
-        if hasattr(target, '__module__') and 'aten' in str(target):
+        # aten.* / prims.* compute operations - emit via torch-mlir
+        if hasattr(target, '__module__') and (
+            'aten' in str(target) or 'prims.' in str(target)
+        ):
             return self.visit_aten_compute(node)
         
         # Unsupported target
@@ -283,6 +303,12 @@ class IRVisitor:
         import re
         from helion._compiler.variable_origin import BlockSizeOrigin
 
+        if node.name in self.range_index_block_ids:
+            return self.range_index_block_ids[node.name]
+
+        if node.target is hl_tile_ops.tile_index and node.args and isinstance(node.args[0], fx.Node):
+            return self._try_get_block_id_from_node(node.args[0])
+
         raw_id: int | None = None
 
         sym_val = node.meta.get("val")
@@ -300,6 +326,48 @@ class IRVisitor:
 
         if raw_id is not None:
             return self.ctx.resolve_block_id(raw_id)
+        return None
+
+    def _get_block_size_value(self, canonical_block_id: int) -> tuple[str, bool]:
+        """Return block-size value as (value, is_static_literal)."""
+        info = self.ctx.env.block_sizes[canonical_block_id]
+        if isinstance(info.size, int):
+            return (str(int(info.size)), True)
+        ssa = self.ctx.block_size_ssa.get(canonical_block_id)
+        if ssa is not None:
+            return (ssa, False)
+        fallback = self.ctx.get_loop_extent(canonical_block_id)
+        if fallback is not None:
+            return (str(fallback), True)
+        return ("1", True)
+
+    def _is_singleton_block(self, canonical_block_id: int) -> bool:
+        """Whether block size is known to be exactly 1."""
+        info = self.ctx.env.block_sizes[canonical_block_id]
+        size = info.size
+        if isinstance(size, int):
+            return size == 1
+        if hasattr(size, "_sympy_"):
+            sym = size._sympy_()
+            shape_env = self.ctx.bound_kernel.env.shape_env
+            if sym in shape_env.var_to_val:
+                return int(shape_env.var_to_val[sym]) == 1
+        return False
+
+    def _extract_tile_index_add(self, node: fx.Node) -> tuple[int, Any] | None:
+        """Detect aten.add(tile_index(...), base) pattern used for contiguous ranges."""
+        if node.target is not aten.add.Tensor or len(node.args) < 2:
+            return None
+        lhs, rhs = node.args[0], node.args[1]
+
+        if isinstance(lhs, fx.Node) and lhs.target is hl_tile_ops.tile_index:
+            block_id = self._try_get_block_id_from_node(lhs)
+            if block_id is not None:
+                return (block_id, rhs)
+        if isinstance(rhs, fx.Node) and rhs.target is hl_tile_ops.tile_index:
+            block_id = self._try_get_block_id_from_node(rhs)
+            if block_id is not None:
+                return (block_id, lhs)
         return None
     
     def visit_get_symnode(self, node: fx.Node) -> str:
@@ -536,53 +604,221 @@ class IRVisitor:
         
         return filled_ssa
     
-    def visit_for_loop(self, node: fx.Node) -> str:
+    def visit_dot(self, node: fx.Node) -> str:
+        """Lower Helion dot op to linalg.matmul."""
+        if len(node.args) < 3:
+            raise RuntimeError(f"dot expects (lhs, rhs, acc, ...), got args={node.args}")
 
-        """Generate affine.for and visit the inner ForLoopGraphInfo."""
+        lhs, rhs, acc = node.args[0], node.args[1], node.args[2]
+        if not isinstance(lhs, fx.Node) or not isinstance(rhs, fx.Node) or not isinstance(acc, fx.Node):
+            raise RuntimeError(f"dot expects FX node operands, got {type(lhs)}, {type(rhs)}, {type(acc)}")
+
+        lhs_ssa = self.ctx.node_values.get(lhs.name, f"%{lhs.name}")
+        rhs_ssa = self.ctx.node_values.get(rhs.name, f"%{rhs.name}")
+        acc_ssa = self.ctx.node_values.get(acc.name, f"%{acc.name}")
+
+        lhs_type = self._get_tensor_type(lhs)
+        rhs_type = self._get_tensor_type(rhs)
+        acc_type = self._get_tensor_type(acc)
+
+        result = self.mlir_output_helper.fresh("dot")
+        self.mlir_output_helper.emit(
+            f"{result} = linalg.matmul "
+            f"ins({lhs_ssa}, {rhs_ssa} : {lhs_type}, {rhs_type}) "
+            f"outs({acc_ssa} : {acc_type}) -> {acc_type}"
+        )
+
+        self.ctx.node_values[node.name] = result
+        self.ctx.node_types[node.name] = acc_type
+        return result
+
+    def _is_python_index_arith_target(self, target: Any) -> bool:
+        """Return True for Python builtins/operator arithmetic on scalar indices."""
+        name = getattr(target, "__name__", None)
+        module = getattr(target, "__module__", "")
+        return (
+            name in {"add", "sub", "mul", "floordiv"}
+            and module in {"builtins", "operator", "_operator"}
+        )
+
+    def _emit_index_constant(self, value: int) -> str:
+        ssa = self.mlir_output_helper.fresh("idx")
+        self.mlir_output_helper.emit(f"{ssa} = arith.constant {int(value)} : index")
+        return ssa
+
+    def _as_index_ssa(self, value: Any) -> str:
+        """Materialize an index-typed SSA value from literals/SymInt/FX nodes."""
+        if isinstance(value, fx.Node):
+            ssa = self.ctx.node_values.get(value.name)
+            if ssa is None:
+                visited = self.visit_node(value)
+                ssa = visited if isinstance(visited, str) else None
+            if ssa is None:
+                raise RuntimeError(f"Unable to resolve index value for node {value.name}")
+            if isinstance(ssa, str) and not ssa.startswith("%"):
+                try:
+                    return self._emit_index_constant(int(ssa))
+                except ValueError:
+                    raise RuntimeError(f"Unsupported non-SSA index value: {ssa}") from None
+            return ssa
+
+        if isinstance(value, bool):
+            return self._emit_index_constant(1 if value else 0)
+        if isinstance(value, int):
+            return self._emit_index_constant(value)
+
+        if hasattr(value, "_sympy_"):
+            resolved, _ = self.resolve_dimension(value, 0)
+            if resolved is None:
+                raise RuntimeError(f"Cannot resolve symbolic index value: {value}")
+            if resolved.startswith("%"):
+                return resolved
+            return self._emit_index_constant(int(resolved))
+
+        if isinstance(value, str):
+            if value.startswith("%"):
+                return value
+            try:
+                return self._emit_index_constant(int(value))
+            except ValueError:
+                raise RuntimeError(f"Unsupported index string value: {value}") from None
+
+        raise RuntimeError(f"Unsupported index operand type: {type(value)} ({value})")
+
+    def visit_python_index_arith(self, node: fx.Node) -> str:
+        """Lower Python/operator scalar arithmetic to index ops."""
+        target = node.target
+        op_name = getattr(target, "__name__", None)
+        if op_name not in {"add", "sub", "mul", "floordiv"}:
+            raise RuntimeError(f"Unsupported python index op: {target}")
+        if len(node.args) != 2:
+            raise RuntimeError(f"Expected binary index op, got args={node.args}")
+
+        lhs = self._as_index_ssa(node.args[0])
+        rhs = self._as_index_ssa(node.args[1])
+
+        result = self.mlir_output_helper.fresh(node.name.replace(".", "_"))
+        if op_name == "add":
+            self.mlir_output_helper.emit(f"{result} = arith.addi {lhs}, {rhs} : index")
+        elif op_name == "sub":
+            self.mlir_output_helper.emit(f"{result} = arith.subi {lhs}, {rhs} : index")
+        elif op_name == "mul":
+            self.mlir_output_helper.emit(f"{result} = arith.muli {lhs}, {rhs} : index")
+        else:
+            self.mlir_output_helper.emit(
+                f"{result} = affine.apply affine_map<(d0)[s0] -> (d0 floordiv s0)>({lhs})[{rhs}]"
+            )
+
+        self.ctx.node_values[node.name] = result
+        self.ctx.node_types[node.name] = "index"
+        return result
+
+    def visit_tile_index_add(self, node: fx.Node) -> str | None:
+        """Lower aten.add(tile_index, base) into a contiguous index-range base."""
+        extracted = self._extract_tile_index_add(node)
+        if extracted is None:
+            return None
+
+        block_id, base = extracted
+        base_ssa = self._as_index_ssa(base)
+        self.range_index_block_ids[node.name] = block_id
+        self.ctx.node_values[node.name] = base_ssa
+        self.ctx.node_types[node.name] = "index"
+        return base_ssa
+
+    def _is_simple_affine_bound_expr(self, expr: Any) -> bool:
+        """Whether an FX loop bound is simple enough to keep affine.for."""
+        if isinstance(expr, (int, bool)):
+            return True
+        if not isinstance(expr, fx.Node):
+            return False
+        return expr.target in {hl_tracing_ops._get_symnode, aten.sym_size.int}
+
+    def _derive_trip_count_from_for_loop_args(
+        self, node: fx.Node, canonical_block_id: int
+    ) -> tuple[str, bool] | None:
+        """Primary path: derive loop trip count from FX _for_loop bounds."""
+        if len(node.args) < 3:
+            return None
+
+        lower_bounds = node.args[1]
+        upper_bounds = node.args[2]
+        if not isinstance(lower_bounds, (list, tuple)) or not isinstance(
+            upper_bounds, (list, tuple)
+        ):
+            return None
+        if len(lower_bounds) != 1 or len(upper_bounds) != 1:
+            return None
+
+        lb = lower_bounds[0]
+        ub = upper_bounds[0]
+
+        # Optional explicit step list (if present in FX args) must be unit.
+        if len(node.args) > 4:
+            steps = node.args[4]
+            step = steps[0] if isinstance(steps, (list, tuple)) and len(steps) == 1 else steps
+            if not isinstance(step, int) or step != 1:
+                raise ValueError(
+                    f"Only unit-step block loops are supported for now; got step {step!r}"
+                )
+
+        # Phase-1 support: only zero-lower-bound loops.
+        if not isinstance(lb, int) or lb != 0:
+            raise ValueError(
+                f"Only zero-lower-bound block loops are supported for now; got lower bound {lb!r}"
+            )
+
+        ub_ssa = self._as_index_ssa(ub)
+        block_info = self.ctx.env.block_sizes[canonical_block_id]
+        if isinstance(block_info.size, int):
+            tile_size_ssa = self._emit_index_constant(int(block_info.size))
+        else:
+            tile_size_ssa = self.ctx.block_size_ssa.get(canonical_block_id)
+            if tile_size_ssa is None:
+                return None
+
+        trip_count_ssa = self.mlir_output_helper.fresh("trip_count")
+        self.mlir_output_helper.emit(
+            f"{trip_count_ssa} = affine.apply "
+            f"affine_map<(d0)[s0] -> (d0 ceildiv s0)>({ub_ssa})[{tile_size_ssa}]"
+        )
+        return trip_count_ssa, self._is_simple_affine_bound_expr(ub)
+
+    def visit_for_loop(self, node: fx.Node) -> str:
+        """Generate affine.for or scf.for and visit inner ForLoopGraphInfo."""
         graph_id = node.args[0]
         args = node.args[3]   # [acc]
-        
+
         # Get the ForLoopGraphInfo
         for_graph = self.ctx.graphs.get(graph_id)
         if for_graph is None:
             raise ValueError(f"ForLoopGraphInfo with graph_id={graph_id} not registered")
-        
+
         # Get block_ids from the graph (resolve through alias map)
-        block_ids = getattr(for_graph, 'block_ids', [self.loop_depth])
+        block_ids = getattr(for_graph, "block_ids", [self.loop_depth])
         block_id = self.ctx.resolve_block_id(block_ids[0] if block_ids else 2)
-        
-        # Use pre-computed trip count (computed outside affine.parallel)
-        trip_count_ssa = self.ctx.reduction_trip_counts.get(block_id)
-        if trip_count_ssa is None:
-            raise ValueError("No trip count found for loop")
-        
-        # Examine ForLoopGraphInfo output to determine actual loop-carried values
-        # Find the output node to get the number of yielded values
-        output_nodes = [n for n in for_graph.graph.nodes if n.op == "output"]
-        num_loop_outputs = 0
-        if output_nodes:
-            output_args = output_nodes[0].args[0]
-            if isinstance(output_args, (list, tuple)):
-                num_loop_outputs = len(output_args)
-            elif output_args is not None:
-                num_loop_outputs = 1
-        
+
+        # Primary path: derive trip count from _for_loop FX bounds.
+        # Fallback path: use pre-computed metadata trip count.
+        derived = self._derive_trip_count_from_for_loop_args(node, block_id)
+        if derived is not None:
+            trip_count_ssa, use_affine_loop = derived
+        else:
+            trip_count_ssa = self.ctx.reduction_trip_counts.get(block_id)
+            if trip_count_ssa is None:
+                raise ValueError("No trip count found for loop")
+            use_affine_loop = True
+
         # ---------------------------------------------------------------------
         # Collect all arguments and classify them using phi-node analysis:
         # - Read-only args: passed to the loop but NOT yielded back
         # - Loop-carried args (iter_args): yielded and updated each iteration
-        #
-        # We determine which args are loop-carried by scanning the _for_loop
-        # node's users for getitem -> _phi chains. An arg is loop-carried iff
-        # it appears as the init value (lhs) of a _phi node whose rhs is a
-        # getitem of this _for_loop's result.
         # ---------------------------------------------------------------------
-        import operator as op_module
         iter_arg_names = set()
         for user in node.users:
-            if user.target is op_module.getitem:
+            if user.target is operator.getitem:
                 for phi_user in user.users:
-                    if hasattr(phi_user, 'target') and phi_user.target is hl_tracing_ops._phi:
+                    if hasattr(phi_user, "target") and phi_user.target is hl_tracing_ops._phi:
                         init_val = phi_user.args[0]
                         if isinstance(init_val, fx.Node):
                             iter_arg_names.add(init_val.name)
@@ -595,121 +831,123 @@ class IRVisitor:
             else:
                 all_args_info.append((f"acc_iter{i}", str(a), None))
 
-        # Classify based on phi analysis
-        readonly_args_info = []
         iter_args_info = []
         for info_tuple in all_args_info:
             name, ssa, fx_name = info_tuple
             if fx_name and fx_name in iter_arg_names:
-                iter_args_info.append(info_tuple)
-            else:
-                readonly_args_info.append(info_tuple)
-        
-        # Determine tensor type for iter_args from their initial values
+                iter_args_info.append((name, ssa, fx_name))
+
         iter_args_types = []
-        for name, ssa, fx_name in iter_args_info:
+        for _, _, fx_name in iter_args_info:
             if fx_name and fx_name in self.ctx.node_types:
                 iter_args_types.append(self.ctx.node_types[fx_name])
             else:
-                raise RuntimeError(f"Cannot compute MLIR type for node {fx_name}")
-        
-        # Emit affine.for
+                fx_node = next(
+                    (a for a in args if isinstance(a, fx.Node) and a.name == fx_name),
+                    None,
+                )
+                if fx_node is not None and "val" in fx_node.meta:
+                    inferred_type = self.ctx.compute_mlir_type_from_fake_tensor(
+                        fx_node.meta["val"]
+                    )
+                    self.ctx.node_types[fx_name] = inferred_type
+                    iter_args_types.append(inferred_type)
+                else:
+                    raise RuntimeError(f"Cannot compute MLIR type for node {fx_name}")
+
         iv = f"%iv_block_{block_id}"
         result = self.mlir_output_helper.fresh(f"for_result_{graph_id}")
-        
-        # Build iter_args string
-        iter_args_parts = []
-        for (name, ssa, _), _ in zip(iter_args_info, iter_args_types):
-            iter_args_parts.append(f"%{name} = {ssa}")
+
+        iter_args_parts = [f"%{name} = {ssa}" for name, ssa, _ in iter_args_info]
         iter_args_str = ", ".join(iter_args_parts)
-        
-        # Result types
         result_types = ", ".join(iter_args_types)
-        
-        # For multi-value results, use :N syntax (e.g., %result:3 = ...)
+
         num_results = len(iter_args_info)
-        if num_results > 1:
-            result_binding = f'{result}:{num_results}'
+        result_binding = f"{result}:{num_results}" if num_results > 1 else result
+
+        if use_affine_loop:
+            self.mlir_output_helper.emit(
+                f"{result_binding} = affine.for {iv} = 0 to {trip_count_ssa} "
+                f"iter_args({iter_args_str}) -> ({result_types}) {{"
+            )
+            yield_op = "affine.yield"
         else:
-            result_binding = result
-        
-        self.mlir_output_helper.emit(
-            f'{result_binding} = affine.for {iv} = 0 to {trip_count_ssa} '
-            f'iter_args({iter_args_str}) -> ({result_types}) {{'
-        )
+            c0 = self._emit_index_constant(0)
+            c1 = self._emit_index_constant(1)
+            self.mlir_output_helper.emit(
+                f"{result_binding} = scf.for {iv} = {c0} to {trip_count_ssa} step {c1} "
+                f"iter_args({iter_args_str}) -> ({result_types}) {{"
+            )
+            yield_op = "scf.yield"
         self.mlir_output_helper.push()
-        
-        # Set up args inside loop - map placeholder names to appropriate SSA values
-        # Device IR uses naming patterns like arg0_1, arg1_1, etc. corresponding
-        # positionally to the args list. We map each placeholder to either:
-        # - Read-only: original SSA from outer scope
-        # - iter_args: the loop block argument SSA (%acc_iterN)
+
         old_loop_iter_args = self.loop_iter_args.copy()
 
         iter_arg_idx = 0
         for i, a in enumerate(args):
             placeholder_name = f"arg{i}_1"
             if isinstance(a, fx.Node) and a.name in iter_arg_names:
-                # Loop-carried iter_arg -> map to block argument
                 iter_name = iter_args_info[iter_arg_idx][0]
                 self.loop_iter_args[placeholder_name] = f"%{iter_name}"
-                # Propagate type from init value to iter_arg placeholder
                 if a.name in self.ctx.node_types:
                     self.ctx.node_types[placeholder_name] = self.ctx.node_types[a.name]
                 iter_arg_idx += 1
             elif isinstance(a, fx.Node):
-                # Read-only -> use original SSA from outer scope
                 ssa = self.ctx.node_values.get(a.name, f"%{a.name}")
                 self.loop_iter_args[placeholder_name] = ssa
-                # Propagate type from outer scope to inner placeholder
                 if a.name in self.ctx.node_types:
                     self.ctx.node_types[placeholder_name] = self.ctx.node_types[a.name]
 
-        
         self.loop_depth += 1
-        
-        # Set current block_id for visit_load to reference the correct IV
+
         old_block_id = self.current_block_id
         self.current_block_id = block_id
-        
-        # Visit inner graph
+
+        # ForLoopGraphInfo nodes are in a separate FX graph and may reuse node
+        # names from the parent graph (e.g. tile_begin, mul_1). Keep a local
+        # scope so inner-body values/types do not leak back to the parent graph.
+        saved_node_values = self.ctx.node_values.copy()
+        saved_node_types = self.ctx.node_types.copy()
+        saved_loop_result_values = self.ctx.loop_result_values.copy()
+        saved_range_index_block_ids = self.range_index_block_ids.copy()
+
         self.visit_graph(for_graph)
-        
-        # Restore old block_id
+
+        loop_result_snapshot = self.current_loop_result
+        loop_result_values_snapshot = self.ctx.loop_result_values.copy()
+
+        self.ctx.node_values = saved_node_values
+        self.ctx.node_types = saved_node_types
+        self.ctx.loop_result_values = saved_loop_result_values
+        self.range_index_block_ids = saved_range_index_block_ids
+        self.current_loop_result = loop_result_snapshot
+
         self.current_block_id = old_block_id
-        
         self.loop_depth -= 1
-        
-        # Restore loop_iter_args
         self.loop_iter_args = old_loop_iter_args
-        
-        # Emit yield with ALL results from inner graph
+
         if isinstance(self.current_loop_result, list) and len(self.current_loop_result) > 1:
-            # Multiple yield values
             yield_values = ", ".join(self.current_loop_result)
             yield_types = ", ".join(iter_args_types)
-            self.mlir_output_helper.emit(f'affine.yield {yield_values} : {yield_types}')
+            self.mlir_output_helper.emit(f"{yield_op} {yield_values} : {yield_types}")
         else:
-            # Single yield value (backward compatible)
-            yield_value = self.current_loop_result[0] if isinstance(self.current_loop_result, list) else (self.current_loop_result or f"%{iter_args_info[0][0]}")
-            yield_type = iter_args_types[0] if iter_args_types else f"tensor<?x?xf32>"
-            self.mlir_output_helper.emit(f'affine.yield {yield_value} : {yield_type}')
-        
+            yield_value = (
+                self.current_loop_result[0]
+                if isinstance(self.current_loop_result, list)
+                else (self.current_loop_result or f"%{iter_args_info[0][0]}")
+            )
+            yield_type = iter_args_types[0] if iter_args_types else "tensor<?x?xf32>"
+            self.mlir_output_helper.emit(f"{yield_op} {yield_value} : {yield_type}")
+
         self.mlir_output_helper.pop()
         self.mlir_output_helper.emit("}")
-        
-        # Store the loop result - for multi-value loops, this SSA represents all results
-        # Individual results are extracted via getitem
+
         self.ctx.node_values[node.name] = result
-        
-        # Also store the result SSAs for each output index
-        # This allows visit_getitem to extract individual results
         if isinstance(self.current_loop_result, list) and len(self.current_loop_result) > 1:
-            self.ctx.loop_result_values = {
-                node.name: result,  # The tuple result SSA
-                '_count': len(self.current_loop_result)  # Number of results
-            }
-        
+            self.ctx.loop_result_values = loop_result_values_snapshot
+            self.ctx.loop_result_values[node.name] = result
+            self.ctx.loop_result_values["_count"] = len(self.current_loop_result)
+
         return result
 
     
@@ -897,6 +1135,7 @@ class IRVisitor:
         offsets = []
         sizes = []
         output_dim_sizes = []
+        retained_dim_positions = []
         
         def parse_memref_dimensions(type_str: str) -> list[str]:
             if 'memref<' in type_str and '>' in type_str:
@@ -932,39 +1171,57 @@ class IRVisitor:
                     self.mlir_output_helper.emit(f'{dim_ssa} = memref.dim {memref_ssa}, {dim_idx_ssa} : {memref_type}')
                     sizes.append((dim_ssa, False))
                 output_dim_sizes.append(src_dim_static)
+                retained_dim_positions.append(i)
                 
             elif isinstance(idx, fx.Node):
                 # Get the SSA value for this index (tile size)
                 idx_ssa = self.ctx.node_values.get(idx.name, f"%{idx.name}")
+
+                # tile_index + base pattern: contiguous range [base, base + block_size)
+                range_block_id = self.range_index_block_ids.get(idx.name)
+                if range_block_id is not None:
+                    size_val, size_is_static = self._get_block_size_value(range_block_id)
+                    offsets.append((idx_ssa, not idx_ssa.startswith("%")))
+                    sizes.append((size_val, size_is_static))
+                    if size_is_static:
+                        try:
+                            output_dim_sizes.append(int(size_val))
+                        except ValueError:
+                            output_dim_sizes.append(None)
+                    else:
+                        output_dim_sizes.append(None)
+                    retained_dim_positions.append(i)
+                    continue
                 
                 # Check if this index has a BlockSizeOrigin - if so, it represents a tile size
                 # and we need to compute offset as iv * block_size
                 block_id = self._try_get_block_id_from_node(idx)
                 
                 if block_id is not None:
-                    # This index represents a tile size (either block_size_X or sym_size_int with BlockSizeOrigin)
-                    # The offset comes from the corresponding loop IV
-                    iv_ssa = f"%iv_block_{block_id}"
-                    
-                    # Compute offset: iv * block_size (always dynamic since iv is runtime)
-                    offset_ssa = self.mlir_output_helper.fresh("offset")
-                    self.mlir_output_helper.emit(
-                        f'{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index'
-                    )
-                    offsets.append((offset_ssa, False))
-                    sizes.append((idx_ssa, False))
-                    output_dim_sizes.append(None)  # Dynamic (block sizes are runtime)
+                    if self._is_singleton_block(block_id):
+                        # Scalar indexing for singleton blocks (size == 1): rank-reduce.
+                        offsets.append((idx_ssa, not idx_ssa.startswith("%")))
+                        sizes.append(("1", True))
+                    else:
+                        # Range indexing for regular tile blocks.
+                        iv_ssa = f"%iv_block_{block_id}"
+                        offset_ssa = self.mlir_output_helper.fresh("offset")
+                        self.mlir_output_helper.emit(
+                            f'{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index'
+                        )
+                        offsets.append((offset_ssa, False))
+                        sizes.append((idx_ssa, False))
+                        output_dim_sizes.append(None)  # Dynamic (block sizes are runtime)
+                        retained_dim_positions.append(i)
                 else:
-                    # Generic index - treat as offset with size 1
+                    # Generic scalar index - rank-reduce this dimension.
                     offsets.append((idx_ssa, False))
                     sizes.append(("1", True))
-                    output_dim_sizes.append(1)
                     
             elif isinstance(idx, int):
-                # Integer literal offset with size 1
+                # Integer scalar index - rank-reduce this dimension.
                 offsets.append((str(idx), True))
                 sizes.append(("1", True))
-                output_dim_sizes.append(1)
             else:
                 raise RuntimeError(f"Unsupported index type: {type(idx)}")
         
@@ -989,32 +1246,40 @@ class IRVisitor:
         
         # Compute strides from source memref dimensions (row-major)
         # For source memref<D0xD1xD2xf32>, strides are [D1*D2, D2, 1]
-        def compute_strides_from_dims(dims: list[str]) -> list[int] | None:
-            """Compute row-major strides from dimension strings. Returns None if any dim is dynamic."""
-            try:
-                int_dims = [int(d) for d in dims]
-            except ValueError:
-                return None  # Has dynamic dimensions
-            
-            strides = []
-            product = 1
-            for d in reversed(int_dims):
-                strides.append(product)
-                product *= d
+        def compute_strides_from_dims(dims: list[str]) -> list[str]:
+            """Compute row-major strides from dimension strings (dynamic dims -> '?')."""
+            strides: list[str] = []
+            running_product: int | None = 1
+            for dim in reversed(dims):
+                strides.append(str(running_product) if running_product is not None else "?")
+                try:
+                    dim_int = int(dim)
+                except ValueError:
+                    running_product = None
+                else:
+                    if running_product is not None:
+                        running_product *= dim_int
             return list(reversed(strides))
         
         src_strides = compute_strides_from_dims(src_dims)
         has_dynamic_offset = any(not is_static for _, is_static in offsets)
-        
         if output_dims:
-            if src_strides is not None and has_dynamic_offset:
-                # Need strided layout with offset: ? for dynamic offsets from static source
-                strides_str = ", ".join(str(s) for s in src_strides)
+            if has_dynamic_offset:
+                # Need strided layout with offset:? whenever offsets are dynamic.
+                # For rank-reduced subviews, keep only the retained source strides.
+                if retained_dim_positions:
+                    layout_strides = [src_strides[p] for p in retained_dim_positions]
+                else:
+                    layout_strides = src_strides
+                strides_str = ", ".join(layout_strides)
                 subview_type = f"memref<{'x'.join(output_dims)}x{dtype_str}, strided<[{strides_str}], offset: ?>>"
             else:
                 subview_type = f"memref<{'x'.join(output_dims)}x{dtype_str}>"
         else:
-            subview_type = f"memref<{dtype_str}>"
+            if has_dynamic_offset:
+                subview_type = f"memref<{dtype_str}, strided<[], offset: ?>>"
+            else:
+                subview_type = f"memref<{dtype_str}>"
         
         # Construct tensor result type
         if output_dims:
@@ -1102,6 +1367,7 @@ class IRVisitor:
         offsets = []
         sizes = []
         output_dim_sizes = []
+        retained_dim_positions = []
         
         def parse_type_dimensions(type_str: str) -> list[str]:
             if ('<' in type_str and '>' in type_str):
@@ -1137,40 +1403,57 @@ class IRVisitor:
                     self.mlir_output_helper.emit(f'{dim_ssa} = tensor.dim {value_ssa}, {dim_idx_ssa} : {value_type}')
                     sizes.append((dim_ssa, False))
                 output_dim_sizes.append(src_dim_static)
+                retained_dim_positions.append(i)
                 
             elif isinstance(idx, fx.Node):
                 idx_ssa = self.ctx.node_values.get(idx.name, f"%{idx.name}")
+
+                # tile_index + base pattern: contiguous range [base, base + block_size)
+                range_block_id = self.range_index_block_ids.get(idx.name)
+                if range_block_id is not None:
+                    size_val, size_is_static = self._get_block_size_value(range_block_id)
+                    offsets.append((idx_ssa, not idx_ssa.startswith("%")))
+                    sizes.append((size_val, size_is_static))
+                    if size_is_static:
+                        try:
+                            output_dim_sizes.append(int(size_val))
+                        except ValueError:
+                            output_dim_sizes.append(None)
+                    else:
+                        output_dim_sizes.append(None)
+                    retained_dim_positions.append(i)
+                    continue
                 
                 # Check if this index has a BlockSizeOrigin - if so, it represents a tile size
                 # and we need to compute offset as iv * block_size
                 block_id = self._try_get_block_id_from_node(idx)
                 
                 if block_id is not None:
-                    # This index represents a tile size (either block_size_X or sym_size_int with BlockSizeOrigin)
-                    # The offset comes from the corresponding loop IV
-                    iv_ssa = f"%iv_block_{block_id}"
-                    
-                    offset_ssa = self.mlir_output_helper.fresh("offset")
-                    self.mlir_output_helper.emit(f'{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index')
-                    offsets.append((offset_ssa, False))
-                    sizes.append((idx_ssa, False))
-                    output_dim_sizes.append(None)  # Dynamic (block sizes are runtime)
+                    if self._is_singleton_block(block_id):
+                        # Scalar indexing for singleton blocks (size == 1): rank-reduce.
+                        offsets.append((idx_ssa, not idx_ssa.startswith("%")))
+                        sizes.append(("1", True))
+                    else:
+                        iv_ssa = f"%iv_block_{block_id}"
+                        offset_ssa = self.mlir_output_helper.fresh("offset")
+                        self.mlir_output_helper.emit(f'{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index')
+                        offsets.append((offset_ssa, False))
+                        sizes.append((idx_ssa, False))
+                        output_dim_sizes.append(None)  # Dynamic (block sizes are runtime)
+                        retained_dim_positions.append(i)
                 else:
-                    # Generic index
+                    # Generic scalar index - rank-reduce this dimension.
                     offsets.append((idx_ssa, False))
                     sizes.append(("1", True))
-                    output_dim_sizes.append(1)
                     
             elif isinstance(idx, int):
-                # Integer literal offset with size 1
+                # Integer scalar index - rank-reduce this dimension.
                 offsets.append((str(idx), True))
                 sizes.append(("1", True))
-                output_dim_sizes.append(1)
             else:
                 # Unknown type - default to 0 offset, size 1
                 offsets.append(("0", True))
                 sizes.append(("1", True))
-                output_dim_sizes.append(1)
         
         # Format offsets, sizes, strides - using inline literals or SSA values
         offsets_str = ", ".join(v for v, _ in offsets)
@@ -1208,42 +1491,39 @@ class IRVisitor:
         
         # Compute strides from source memref dimensions (row-major)
         # For source memref<D0xD1xD2xf32>, strides are [D1*D2, D2, 1]
-        def compute_strides_from_dims(dims: list[str]) -> list[int] | None:
-            """Compute row-major strides from dimension strings. Returns None if any dim is dynamic."""
-            try:
-                int_dims = [int(d) for d in dims]
-            except ValueError:
-                return None  # Has dynamic dimensions
-            
-            strides = []
-            product = 1
-            for d in reversed(int_dims):
-                strides.append(product)
-                product *= d
+        def compute_strides_from_dims(dims: list[str]) -> list[str]:
+            """Compute row-major strides from dimension strings (dynamic dims -> '?')."""
+            strides: list[str] = []
+            running_product: int | None = 1
+            for dim in reversed(dims):
+                strides.append(str(running_product) if running_product is not None else "?")
+                try:
+                    dim_int = int(dim)
+                except ValueError:
+                    running_product = None
+                else:
+                    if running_product is not None:
+                        running_product *= dim_int
             return list(reversed(strides))
         
         src_strides = compute_strides_from_dims(memref_dims)
         has_dynamic_offset = any(not is_static for _, is_static in offsets)
 
-        # Rank-reducing subview: drop size-1 dims that come from scalar indices
-        # so the subview rank matches the value tensor rank.
-        reduced_dims = []
-        reduced_strides = []
-        for i, dim in enumerate(output_dims):
-            if dim == "1" and output_dim_sizes[i] == 1:
-                continue  # scalar index → drop this dimension
-            reduced_dims.append(dim)
-            if src_strides is not None:
-                reduced_strides.append(src_strides[i])
-
-        if reduced_dims:
-            if src_strides is not None and has_dynamic_offset:
-                strides_layout_str = ", ".join(str(s) for s in reduced_strides)
-                subview_type = f"memref<{'x'.join(reduced_dims)}x{dtype_str}, strided<[{strides_layout_str}], offset: ?>>"
+        if output_dims:
+            if has_dynamic_offset:
+                if retained_dim_positions:
+                    layout_strides = [src_strides[p] for p in retained_dim_positions]
+                else:
+                    layout_strides = src_strides
+                strides_layout_str = ", ".join(layout_strides)
+                subview_type = f"memref<{'x'.join(output_dims)}x{dtype_str}, strided<[{strides_layout_str}], offset: ?>>"
             else:
-                subview_type = f"memref<{'x'.join(reduced_dims)}x{dtype_str}>"
+                subview_type = f"memref<{'x'.join(output_dims)}x{dtype_str}>"
         else:
-            subview_type = f"memref<{dtype_str}>"
+            if has_dynamic_offset:
+                subview_type = f"memref<{dtype_str}, strided<[], offset: ?>>"
+            else:
+                subview_type = f"memref<{dtype_str}>"
 
         subview_ssa = self.mlir_output_helper.fresh("subview")
         self.mlir_output_helper.emit(
@@ -1304,6 +1584,7 @@ class IRVisitor:
         offsets = []
         sizes = []
         output_dim_sizes = []
+        retained_dim_positions = []
 
         def parse_memref_dimensions(type_str: str) -> list[str]:
             if "memref<" in type_str and ">" in type_str:
@@ -1339,28 +1620,46 @@ class IRVisitor:
                     )
                     sizes.append((dim_ssa, False))
                 output_dim_sizes.append(src_dim_static)
+                retained_dim_positions.append(i)
 
             elif isinstance(idx, fx.Node):
                 idx_ssa = self.ctx.node_values.get(idx.name, f"%{idx.name}")
+                range_block_id = self.range_index_block_ids.get(idx.name)
+                if range_block_id is not None:
+                    size_val, size_is_static = self._get_block_size_value(range_block_id)
+                    offsets.append((idx_ssa, not idx_ssa.startswith("%")))
+                    sizes.append((size_val, size_is_static))
+                    if size_is_static:
+                        try:
+                            output_dim_sizes.append(int(size_val))
+                        except ValueError:
+                            output_dim_sizes.append(None)
+                    else:
+                        output_dim_sizes.append(None)
+                    retained_dim_positions.append(i)
+                    continue
                 block_id = self._try_get_block_id_from_node(idx)
                 if block_id is not None:
-                    iv_ssa = f"%iv_block_{block_id}"
-                    offset_ssa = self.mlir_output_helper.fresh("offset")
-                    self.mlir_output_helper.emit(
-                        f"{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index"
-                    )
-                    offsets.append((offset_ssa, False))
-                    sizes.append((idx_ssa, False))
-                    output_dim_sizes.append(None)
+                    if self._is_singleton_block(block_id):
+                        offsets.append((idx_ssa, not idx_ssa.startswith("%")))
+                        sizes.append(("1", True))
+                    else:
+                        iv_ssa = f"%iv_block_{block_id}"
+                        offset_ssa = self.mlir_output_helper.fresh("offset")
+                        self.mlir_output_helper.emit(
+                            f"{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index"
+                        )
+                        offsets.append((offset_ssa, False))
+                        sizes.append((idx_ssa, False))
+                        output_dim_sizes.append(None)
+                        retained_dim_positions.append(i)
                 else:
                     offsets.append((idx_ssa, False))
                     sizes.append(("1", True))
-                    output_dim_sizes.append(1)
 
             elif isinstance(idx, int):
                 offsets.append((str(idx), True))
                 sizes.append(("1", True))
-                output_dim_sizes.append(1)
             else:
                 raise RuntimeError(f"Unsupported atomic_add index type: {type(idx)}")
 
@@ -1379,25 +1678,29 @@ class IRVisitor:
             else:
                 output_dims.append("?")
 
-        def compute_strides_from_dims(dims: list[str]) -> list[int] | None:
-            try:
-                int_dims = [int(d) for d in dims]
-            except ValueError:
-                return None
-
-            strides = []
-            product = 1
-            for d in reversed(int_dims):
-                strides.append(product)
-                product *= d
+        def compute_strides_from_dims(dims: list[str]) -> list[str]:
+            strides: list[str] = []
+            running_product: int | None = 1
+            for dim in reversed(dims):
+                strides.append(str(running_product) if running_product is not None else "?")
+                try:
+                    dim_int = int(dim)
+                except ValueError:
+                    running_product = None
+                else:
+                    if running_product is not None:
+                        running_product *= dim_int
             return list(reversed(strides))
 
         src_strides = compute_strides_from_dims(src_dims)
         has_dynamic_offset = any(not is_static for _, is_static in offsets)
-
         if output_dims:
-            if src_strides is not None and has_dynamic_offset:
-                strides_layout = ", ".join(str(s) for s in src_strides)
+            if has_dynamic_offset:
+                if retained_dim_positions:
+                    layout_strides = [src_strides[p] for p in retained_dim_positions]
+                else:
+                    layout_strides = src_strides
+                strides_layout = ", ".join(layout_strides)
                 subview_type = (
                     f"memref<{'x'.join(output_dims)}x{dtype_str}, "
                     f"strided<[{strides_layout}], offset: ?>>"
@@ -1405,7 +1708,10 @@ class IRVisitor:
             else:
                 subview_type = f"memref<{'x'.join(output_dims)}x{dtype_str}>"
         else:
-            subview_type = f"memref<{dtype_str}>"
+            if has_dynamic_offset:
+                subview_type = f"memref<{dtype_str}, strided<[], offset: ?>>"
+            else:
+                subview_type = f"memref<{dtype_str}>"
 
         offsets_str = ", ".join(v for v, _ in offsets)
         sizes_str = ", ".join(v for v, _ in sizes)
@@ -1454,6 +1760,19 @@ class IRVisitor:
         return source_ssa
 
     
+    def visit_tile_index(self, node: fx.Node) -> str:
+        """Record tile_index(block_size_X) as a range-index producer."""
+        block_size_node = node.args[0]
+        block_id = self._try_get_block_id_from_node(block_size_node)
+        if block_id is None:
+            raise ValueError(f"Cannot determine block_id for tile_index node {node.name}")
+        self.range_index_block_ids[node.name] = block_id
+        # tile_index values are consumed by aten.add(...), which rewrites to a base index.
+        placeholder = self._emit_index_constant(0)
+        self.ctx.node_values[node.name] = placeholder
+        self.ctx.node_types[node.name] = "index"
+        return placeholder
+
     def visit_tile_id(self, node: fx.Node) -> str:
         """Map tile_id(block_size_X) to the corresponding parallel loop IV."""
         block_size_node = node.args[0]
@@ -1897,6 +2216,12 @@ class IRVisitor:
         )
         
         self.ctx.node_values[node.name] = result
+        if "val" in node.meta:
+            val = node.meta["val"]
+            if hasattr(val, "shape"):
+                self.ctx.node_types[node.name] = self.ctx.compute_mlir_type_from_fake_tensor(val)
+            elif hasattr(val, "dtype"):
+                self.ctx.node_types[node.name] = torch_dtype_to_mlir_element_type(val.dtype)
         return result
     
     def _get_element_type_from_node(self, node: fx.Node) -> str:

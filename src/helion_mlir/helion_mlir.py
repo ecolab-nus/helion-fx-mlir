@@ -189,8 +189,10 @@ def generate_mlir(
         sym_name = next(iter(info.debug_names), f"block_{canonical_id}")
         ssa = f"%{sym_name}"
 
-        if not isinstance(info.size, int):
-            upper_bound = ctx.loop_extents[info.block_id]
+        if isinstance(info.size, int):
+            builder.emit(f"{ssa} = arith.constant {info.size} : index")
+        else:
+            upper_bound = ctx.get_loop_extent_or_hint(info.block_id)
             is_reduction = str(info.reduction).lower()
             builder.emit(
                 f'{ssa} = "loom.sym"() {{'
@@ -229,9 +231,7 @@ def generate_mlir(
     for block_id in reduction_block_ids:
         canonical_id = ctx.resolve_block_id(block_id)
         info = ctx.env.block_sizes[block_id]
-        total_extent = ctx.loop_extents.get(block_id)
-        if total_extent is None:
-            continue
+        total_extent = ctx.get_loop_extent_or_hint(block_id)
 
         trip_count_ssa = builder.fresh("trip_count")
         if isinstance(info.size, int):
@@ -265,7 +265,7 @@ def generate_mlir(
         for block_id in grid_block_ids:
             canonical_id = ctx.resolve_block_id(block_id)
             info = ctx.env.block_sizes[block_id]
-            total_extent = ctx.loop_extents[block_id]
+            total_extent = ctx.get_loop_extent_or_hint(block_id)
 
             if isinstance(info.size, int):
                 val = math.ceil(total_extent / info.size)
