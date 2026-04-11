@@ -63,7 +63,7 @@ def helion_mamba2_chunk_scan_kernel(
     block_m = hl.register_block_size(chunk_size)
     block_n = hl.register_block_size(headdim)
     block_k = hl.register_block_size(64, 64)
-    dstate = hl.specialize(dstate)
+    #dstate = hl.specialize(dstate)
 
     assert cb.shape == (batch, nchunks, ngroups, chunk_size, chunk_size)
     assert x.shape == (batch, seqlen, nheads, headdim)

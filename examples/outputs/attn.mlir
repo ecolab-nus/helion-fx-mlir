@@ -1,3 +1,203 @@
+=== Device IR ===
+Graph 0: ForLoopGraphInfo
+opcode         name          target                                     args                                                                         kwargs
+-------------  ------------  -----------------------------------------  ---------------------------------------------------------------------------  --------
+placeholder    arg0_1        arg0_1                                     ()                                                                           {}
+placeholder    arg1_1        arg1_1                                     ()                                                                           {}
+placeholder    arg2_1        arg2_1                                     ()                                                                           {}
+placeholder    arg3_1        arg3_1                                     ()                                                                           {}
+placeholder    arg4_1        arg4_1                                     ()                                                                           {}
+call_function  _new_var      <function _new_var at 0x7cdf5241d260>      (arg0_1,)                                                                    {}
+call_function  _new_var_1    <function _new_var at 0x7cdf5241d260>      (arg1_1,)                                                                    {}
+call_function  _new_var_2    <function _new_var at 0x7cdf5241d260>      (arg2_1,)                                                                    {}
+call_function  _new_var_3    <function _new_var at 0x7cdf5241d260>      (arg3_1,)                                                                    {}
+call_function  _new_var_4    <function _new_var at 0x7cdf5241d260>      (arg4_1,)                                                                    {}
+call_function  k_view        <function _host_tensor at 0x7cdf523976a0>  ('k_view',)                                                                  {}
+call_function  sym_size_int  aten.sym_size.int                          (arg0_1, 0)                                                                  {}
+call_function  block_size_3  <function _get_symnode at 0x7cdf523965c0>  ('block_size_3',)                                                            {}
+call_function  k             <function load at 0x7cdeaceceb60>          (k_view, [sym_size_int, slice(None, None, None), block_size_3], None, None)  {}
+call_function  qk            aten.bmm.default                           (_new_var, k)                                                                {}
+call_function  _mask_to_2    <function _mask_to at 0x7cdf5241cea0>      (qk, -inf)                                                                   {}
+call_function  amax          aten.amax.default                          (_mask_to_2, [-1])                                                           {}
+call_function  mul           aten.mul.Tensor                            (amax, _new_var_2)                                                           {}
+call_function  m_ij          aten.maximum.default                       (_new_var_1, mul)                                                            {}
+call_function  mul_1         aten.mul.Tensor                            (qk, _new_var_2)                                                             {}
+call_function  subscript     <function subscript at 0x7cdeacf04180>     (m_ij, [slice(None, None, None), slice(None, None, None), None])             {}
+call_function  qk_1          aten.sub.Tensor                            (mul_1, subscript)                                                           {}
+call_function  exp2          aten.exp2.default                          (qk_1,)                                                                      {}
+call_function  _mask_to_3    <function _mask_to at 0x7cdf5241cea0>      (exp2, 0)                                                                    {}
+call_function  l_ij          aten.sum.dim_IntList                       (_mask_to_3, [-1])                                                           {}
+call_function  sub_1         aten.sub.Tensor                            (_new_var_1, m_ij)                                                           {}
+call_function  alpha         aten.exp2.default                          (sub_1,)                                                                     {}
+call_function  mul_2         aten.mul.Tensor                            (_new_var_3, alpha)                                                          {}
+call_function  l_i           aten.add.Tensor                            (mul_2, l_ij)                                                                {}
+call_function  subscript_1   <function subscript at 0x7cdeacf04180>     (alpha, [slice(None, None, None), slice(None, None, None), None])            {}
+call_function  acc           aten.mul.Tensor                            (_new_var_4, subscript_1)                                                    {}
+call_function  v_view        <function _host_tensor at 0x7cdf523976a0>  ('v_view',)                                                                  {}
+call_function  v             <function load at 0x7cdeaceceb60>          (v_view, [sym_size_int, block_size_3, slice(None, None, None)], None, None)  {}
+call_function  acc_1         aten.baddbmm.default                       (acc, _mask_to_3, v)                                                         {}
+call_function  m_i           <function _new_var at 0x7cdf5241d260>      (m_ij,)                                                                      {}
+output         output        output                                     ([m_i, l_i, acc_1],)                                                         {}
+Graph 1: RootGraphInfo
+opcode         name          target                                     args                                                                         kwargs
+-------------  ------------  -----------------------------------------  ---------------------------------------------------------------------------  ----------------------------------------------------------------------------------------------------
+call_function  qk_scale_dev  <function full at 0x7cdead162340>          ([], 0.12751743074602467, torch.float16, None)                               {}
+call_function  block_size_0  <function _get_symnode at 0x7cdf523965c0>  ('block_size_0',)                                                            {}
+call_function  block_size_1  <function _get_symnode at 0x7cdf523965c0>  ('block_size_1',)                                                            {}
+call_function  m_i           <function full at 0x7cdead162340>          ([block_size_0, block_size_1], -inf, torch.float16, None)                    {}
+call_function  l_i           aten.full.default                          ([block_size_0, block_size_1], 1.0)                                          {'dtype': torch.float16, 'layout': torch.strided, 'device': device(type='cpu'), 'pin_memory': False}
+call_function  acc           <function full at 0x7cdead162340>          ([block_size_0, block_size_1, 128], 0.0, torch.float16, None)                {}
+call_function  q_view        <function _host_tensor at 0x7cdf523976a0>  ('q_view',)                                                                  {}
+call_function  q             <function load at 0x7cdeaceceb60>          (q_view, [block_size_0, block_size_1, slice(None, None, None)], None, None)  {}
+call_function  k_in_size1    <function _get_symnode at 0x7cdf523965c0>  ('k_in_size1',)                                                              {}
+call_function  _for_loop     <function _for_loop at 0x7cdf52397a60>     (0, [0], [k_in_size1], [q, m_i, qk_scale_dev, l_i, acc])                     {}
+call_function  getitem       <built-in function getitem>                (_for_loop, 0)                                                               {}
+call_function  getitem_1     <built-in function getitem>                (_for_loop, 1)                                                               {}
+call_function  getitem_2     <built-in function getitem>                (_for_loop, 2)                                                               {}
+call_function  _phi          <function _phi at 0x7cdf5241c040>          (m_i, getitem)                                                               {}
+call_function  _phi_1        <function _phi at 0x7cdf5241c040>          (l_i, getitem_1)                                                             {}
+call_function  _phi_2        <function _phi at 0x7cdf5241c040>          (acc, getitem_2)                                                             {}
+call_function  subscript     <function subscript at 0x7cdeacf04180>     (_phi_1, [slice(None, None, None), slice(None, None, None), None])           {}
+call_function  acc_1         aten.div.Tensor                            (_phi_2, subscript)                                                          {}
+call_function  out           <function _host_tensor at 0x7cdf523976a0>  ('out',)                                                                     {}
+call_function  store         <function store at 0x7cdeacece700>         (out, [block_size_0, block_size_1, slice(None, None, None)], acc_1, None)    {}
+output         output        output                                     (None,)                                                                      {}
+
+
+=== Nodes with symbols ===
+Node arg0_1 : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node arg1_1 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node arg2_1 : FakeTensor(..., size=(), dtype=torch.float16)
+Node arg3_1 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node arg4_1 : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node _new_var : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node _new_var_1 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node _new_var_2 : FakeTensor(..., size=(), dtype=torch.float16)
+Node _new_var_3 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node _new_var_4 : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node k_view : FakeTensor(..., size=(s35, 128, s34), dtype=torch.float16)
+Node sym_size_int : u4
+Node block_size_3 : u7
+Node k : FakeTensor(..., size=(u4, 128, u7), dtype=torch.float16)
+Node qk : FakeTensor(..., size=(u4, u5, u7), dtype=torch.float16)
+Node _mask_to_2 : FakeTensor(..., size=(u4, u5, u7), dtype=torch.float16)
+Node amax : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node mul : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node m_ij : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node mul_1 : FakeTensor(..., size=(u4, u5, u7), dtype=torch.float16)
+Node subscript : FakeTensor(..., size=(u4, u5, 1), dtype=torch.float16)
+Node qk_1 : FakeTensor(..., size=(u4, u5, u7), dtype=torch.float16)
+Node exp2 : FakeTensor(..., size=(u4, u5, u7), dtype=torch.float16)
+Node _mask_to_3 : FakeTensor(..., size=(u4, u5, u7), dtype=torch.float16)
+Node l_ij : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node sub_1 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node alpha : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node mul_2 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node l_i : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node subscript_1 : FakeTensor(..., size=(u4, u5, 1), dtype=torch.float16)
+Node acc : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node v_view : FakeTensor(..., size=(s80, s34, 128), dtype=torch.float16)
+Node v : FakeTensor(..., size=(u4, u7, 128), dtype=torch.float16)
+Node acc_1 : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node m_i : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node qk_scale_dev : FakeTensor(..., size=(), dtype=torch.float16)
+Node block_size_0 : u4
+Node block_size_1 : u5
+Node m_i : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node l_i : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node acc : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node q_view : FakeTensor(..., size=(s30, s48, 128), dtype=torch.float16)
+Node q : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node k_in_size1 : s34
+Node _for_loop : [FakeTensor(..., size=(u4, u5), dtype=torch.float16), FakeTensor(..., size=(u4, u5), dtype=torch.float16), FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)]
+Node getitem : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node getitem_1 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node getitem_2 : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node _phi : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node _phi_1 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node _phi_2 : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node subscript : FakeTensor(..., size=(u4, u5, 1), dtype=torch.float16)
+Node acc_1 : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node out : FakeTensor(..., size=(s30, s48, 128), dtype=torch.float16)
+Node arg0_1 : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node arg1_1 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node arg2_1 : FakeTensor(..., size=(), dtype=torch.float16)
+Node arg3_1 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node arg4_1 : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node _new_var : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node _new_var_1 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node _new_var_2 : FakeTensor(..., size=(), dtype=torch.float16)
+Node _new_var_3 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node _new_var_4 : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node k_view : FakeTensor(..., size=(s35, 128, s34), dtype=torch.float16)
+Node sym_size_int : u4
+Node block_size_3 : u7
+Node k : FakeTensor(..., size=(u4, 128, u7), dtype=torch.float16)
+Node qk : FakeTensor(..., size=(u4, u5, u7), dtype=torch.float16)
+Node _mask_to_2 : FakeTensor(..., size=(u4, u5, u7), dtype=torch.float16)
+Node amax : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node mul : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node m_ij : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node mul_1 : FakeTensor(..., size=(u4, u5, u7), dtype=torch.float16)
+Node subscript : FakeTensor(..., size=(u4, u5, 1), dtype=torch.float16)
+Node qk_1 : FakeTensor(..., size=(u4, u5, u7), dtype=torch.float16)
+Node exp2 : FakeTensor(..., size=(u4, u5, u7), dtype=torch.float16)
+Node _mask_to_3 : FakeTensor(..., size=(u4, u5, u7), dtype=torch.float16)
+Node l_ij : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node sub_1 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node alpha : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node mul_2 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node l_i : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node subscript_1 : FakeTensor(..., size=(u4, u5, 1), dtype=torch.float16)
+Node acc : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node v_view : FakeTensor(..., size=(s80, s34, 128), dtype=torch.float16)
+Node v : FakeTensor(..., size=(u4, u7, 128), dtype=torch.float16)
+Node acc_1 : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node m_i : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node qk_scale_dev : FakeTensor(..., size=(), dtype=torch.float16)
+Node block_size_0 : u4
+Node block_size_1 : u5
+Node m_i : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node l_i : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node acc : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node q_view : FakeTensor(..., size=(s30, s48, 128), dtype=torch.float16)
+Node q : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node k_in_size1 : s34
+Node _for_loop : [FakeTensor(..., size=(u4, u5), dtype=torch.float16), FakeTensor(..., size=(u4, u5), dtype=torch.float16), FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)]
+Node getitem : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node getitem_1 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node getitem_2 : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node _phi : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node _phi_1 : FakeTensor(..., size=(u4, u5), dtype=torch.float16)
+Node _phi_2 : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node subscript : FakeTensor(..., size=(u4, u5, 1), dtype=torch.float16)
+Node acc_1 : FakeTensor(..., size=(u4, u5, 128), dtype=torch.float16)
+Node out : FakeTensor(..., size=(s30, s48, 128), dtype=torch.float16)
+
+
+=== Compile Environment ===
+Block Sizes (4):
+  Block 0: Size=s30, Var=u4, Reduction=False, Source=LoopSpecBlockSizeSource()
+  Block 1: Size=s48, Var=u5, Reduction=False, Source=LoopSpecBlockSizeSource()
+  Block 2: Size=128, Var=128, Reduction=True, Source=ReductionLoopBlockSizeSource(reduction_loop=0)
+  Block 3: Size=s34, Var=u7, Reduction=False, Source=LoopSpecBlockSizeSource()
+Shape Env (13):
+  Var s30: 32
+  Var s48: 4096
+  Var s22: 128
+  Var s35: 32
+  Var s34: 4096
+  Var s4: 128
+  Var s80: 32
+  Var s41: 4096
+  Var s66: 128
+  Var u4: 64
+  Var u5: 64
+  Var u6: 128
+  Var u7: 64
+
+
+=== MLIR Dump ===
 #map = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
 #map1 = affine_map<(d0, d1, d2) -> (d0, d1)>
 #map2 = affine_map<(d0, d1) -> (d0, d1)>
@@ -140,4 +340,7 @@ module attributes {loom.tile_b = {is_reduction = false, upper_bound = 32 : index
     return
   }
 }
+
+
+mlir-opt validation succeeded.
 

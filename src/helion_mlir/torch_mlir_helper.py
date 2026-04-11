@@ -98,7 +98,7 @@ class TorchMLIRNodeImporter:
     def import_node(
         self,
         node: fx.Node,
-        input_tensors: list[torch.Tensor],
+        input_tensors: list[object],
     ) -> str:
         """Import a single FX node to MLIR by creating a minimal graph.
         
@@ -133,22 +133,38 @@ class TorchMLIRNodeImporter:
                 return tuple(converted) if isinstance(val, tuple) else converted
             return val
         
+        precise_input_values: list[object] = []
+
         # We need to map args while maintaining structure (lists, tuples)
-        def map_arg(arg):
+        def map_graph_arg(arg):
             if isinstance(arg, fx.Node):
                 try:
                     val = next(fake_tensor_iter)
                     placeholder = graph.placeholder(f"input_{len(placeholder_nodes)}")
-                    # Ensure placeholder val is a FakeTensor
-                    placeholder.meta["val"] = to_fake_tensor(val)
+                    fake_val = to_fake_tensor(val)
+                    placeholder.meta["val"] = fake_val
+                    precise_input_values.append(fake_val)
                     placeholder_nodes.append(placeholder)
                     return placeholder
                 except StopIteration:
                     raise RuntimeError("Mismatch between node args and input fake tensors")
             return arg
 
-        new_args = fx.map_arg(node.args, map_arg)
-        new_kwargs = fx.map_arg(node.kwargs, map_arg)
+        new_args = fx.map_arg(node.args, map_graph_arg)
+        new_kwargs = fx.map_arg(node.kwargs, map_graph_arg)
+
+        precise_input_iter = iter(precise_input_values)
+
+        def map_value_arg(arg):
+            if isinstance(arg, fx.Node):
+                try:
+                    return next(precise_input_iter)
+                except StopIteration:
+                    raise RuntimeError("Mismatch between graph args and precise values")
+            return arg
+
+        precise_args = fx.map_arg(node.args, map_value_arg)
+        precise_kwargs = fx.map_arg(node.kwargs, map_value_arg)
         
         # Create the operation node
         op_node = graph.call_function(node.target, args=new_args, kwargs=new_kwargs)
@@ -158,8 +174,11 @@ class TorchMLIRNodeImporter:
         import operator
         
         if "val" in node.meta:
-            val = node.meta["val"]
-            fake_val = to_fake_tensor(val)
+            try:
+                fake_val = node.target(*precise_args, **precise_kwargs)
+            except Exception:
+                val = node.meta["val"]
+                fake_val = to_fake_tensor(val)
             op_node.meta["val"] = fake_val
             
             # Check if output is a tuple (like max.dim returns (values, indices))
@@ -189,14 +208,18 @@ class TorchMLIRNodeImporter:
 
 
 
-def create_fake_tensors_for_node(node: fx.Node) -> list[torch.Tensor]:
+def create_fake_tensors_for_node(
+    node: fx.Node,
+    resolver=None,
+) -> list[object]:
     """Create fake tensors for a node's inputs based on metadata.
     
     Args:
         node: FX node whose inputs need fake tensors
         
     Returns:
-        List of fake tensors matching input shapes/dtypes (flattened)
+        List of fake tensor / scalar inputs matching the node's flattened input
+        structure.
     """
     from torch._subclasses.fake_tensor import FakeTensorMode
     
@@ -206,7 +229,7 @@ def create_fake_tensors_for_node(node: fx.Node) -> list[torch.Tensor]:
     def process_arg(arg):
         if isinstance(arg, fx.Node):
             # Try to get existing val
-            val = arg.meta.get("val")
+            val = resolver(arg) if resolver is not None else arg.meta.get("val")
             if isinstance(val, torch.Tensor):
                 from torch._subclasses.fake_tensor import FakeTensor
                 if isinstance(val, FakeTensor):
@@ -247,6 +270,8 @@ def get_cached_context():
 
 def import_aten_node_to_mlir(
     node: fx.Node,
+    *,
+    input_tensors: list[object] | None = None,
 ) -> str:
     """Import an ATen FX node to MLIR using torch-mlir.
     
@@ -268,7 +293,7 @@ def import_aten_node_to_mlir(
     from torch_mlir.extras.fx_importer import FxImporter
     importer._importer = FxImporter(context=importer._context)
     
-    fake_tensors = create_fake_tensors_for_node(node)
+    fake_tensors = input_tensors if input_tensors is not None else create_fake_tensors_for_node(node)
     return importer.import_node(node, fake_tensors)
 
 
@@ -556,7 +581,6 @@ def inline_torch_mlir_output(
     *,
     dimension_ssa_map: dict[str, list[str | None]] | None = None,
     scalar_operand_map: dict[int, str] | None = None,
-    operand_types: dict[str, str] | None = None,
 ) -> str:
     """Inline torch-mlir generated text into the current output helper.
 
@@ -585,10 +609,6 @@ def inline_torch_mlir_output(
             in the body. This matches the pattern where scalar constants are
             captured directly in linalg.generic body rather than passed as
             0-rank tensor ins() operands.
-        operand_types: Optional mapping from operand SSA to its actual MLIR type
-            string (e.g. ``{"%tile28": "tensor<?x?x4096xf32>"}``).
-            When provided, the generated types from torch-mlir are replaced with
-            the actual types so that SSA definitions stay consistent.
 
 
     Returns:
@@ -647,33 +667,6 @@ def inline_torch_mlir_output(
     if scalar_operand_map:
         for idx, scalar_ssa in scalar_operand_map.items():
             scalar_arg_ssas[f"%arg{idx}"] = scalar_ssa
-
-    # -------------------------------------------------------------------------
-    # PASS 2b: Build operand type replacement map (old_type -> new_type)
-    # -------------------------------------------------------------------------
-    type_replace_map: dict[str, str] = {}
-    if operand_types:
-        sig_line = ""
-        for ln in lines:
-            if "func.func @aten_op" in ln:
-                sig_line = ln
-                break
-        if sig_line:
-            arg_pattern = re.compile(r'%arg(\d+)\s*:\s*(tensor<[^>]+>|memref<[^>]+>)')
-            for m in arg_pattern.finditer(sig_line):
-                arg_idx = int(m.group(1))
-                old_type = m.group(2)
-                if arg_idx < len(operands):
-                    op_ssa = operands[arg_idx]
-                    new_type = operand_types.get(op_ssa)
-                    if new_type and new_type != old_type:
-                        type_replace_map[old_type] = new_type
-
-    if type_replace_map:
-        patched = mlir_text
-        for old_t, new_t in type_replace_map.items():
-            patched = patched.replace(old_t, new_t)
-        lines = patched.splitlines()
 
     # Regex to identify SSAs
     ssa_pattern = re.compile(r'%([a-zA-Z0-9_][a-zA-Z0-9_.+-]*)')
@@ -938,4 +931,3 @@ def inline_torch_mlir_output(
         mlir_output_helper.emit(new_line)
 
     return result_ssa
-

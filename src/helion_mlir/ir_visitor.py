@@ -36,7 +36,6 @@ from .mlir_utils import (
     format_attr_dict,
     format_string_attr,
     torch_dtype_to_mlir_element_type,
-    format_tensor_type,
     format_memref_type,
 )
 from .torch_mlir_helper import (
@@ -320,7 +319,7 @@ class IRVisitor:
         # aten.full.default -> tensor.empty + linalg.fill
         if target is aten.full.default:
             return self.visit_aten_full(node)
-        
+
         # aten.* / prims.* compute operations - emit via torch-mlir
         if hasattr(target, '__module__') and (
             'aten' in str(target) or 'prims.' in str(target)
@@ -2244,12 +2243,6 @@ class IRVisitor:
         # The output is always linalg-on-tensors
         # -------------------------------------------------------------------------
         
-        # Use torch-mlir to generate MLIR for this operation
-        mlir_text = import_aten_node_to_mlir(node)
-        if mlir_text is None:
-             raise RuntimeError(f"Failed to lower ATen op: {node.name} ({target})")
-
-        
         # Collect SSA values for tensor operands (matching what import_aten_node_to_mlir expects as args)
         tensor_operands = []
         tensor_operand_nodes = []  # Keep track of the actual nodes for dimension analysis
@@ -2261,6 +2254,24 @@ class IRVisitor:
             
         fx.map_arg(node.args, collect_operands)
         fx.map_arg(node.kwargs, collect_operands)
+
+        precise_import_inputs: list[object] = []
+
+        def collect_precise_import_inputs(arg):
+            if isinstance(arg, fx.Node):
+                precise_import_inputs.append(self._create_precise_import_value(arg))
+            return arg
+
+        fx.map_arg(node.args, collect_precise_import_inputs)
+        fx.map_arg(node.kwargs, collect_precise_import_inputs)
+
+        # Use torch-mlir to generate MLIR for this operation
+        mlir_text = import_aten_node_to_mlir(
+            node,
+            input_tensors=precise_import_inputs,
+        )
+        if mlir_text is None:
+             raise RuntimeError(f"Failed to lower ATen op: {node.name} ({target})")
         
         # -------------------------------------------------------------------------
         # Build dimension_ssa_map for tensor.dim optimization
@@ -2322,15 +2333,6 @@ class IRVisitor:
                 if node_type and not node_type.startswith("tensor<") and not node_type.startswith("memref<"):
                     scalar_operand_map[i] = tensor_operands[i]
 
-        # Build operand_types map for type consistency
-        op_types: dict[str, str] = {}
-        for op_ssa, op_node in zip(tensor_operands, tensor_operand_nodes):
-            if isinstance(op_node, fx.Node):
-                try:
-                    op_types[op_ssa] = self._get_tensor_type(op_node)
-                except RuntimeError:
-                    pass
-
         from .torch_mlir_helper import inline_torch_mlir_output
         result = inline_torch_mlir_output(
             mlir_text,
@@ -2338,18 +2340,20 @@ class IRVisitor:
             self.mlir_output_helper,
             dimension_ssa_map=dimension_ssa_map if dimension_ssa_map else None,
             scalar_operand_map=scalar_operand_map if scalar_operand_map else None,
-            operand_types=op_types if op_types else None,
         )
         
         self.ctx.node_values[node.name] = result
+        imported_result_type = self._extract_imported_result_type(mlir_text)
         if "val" in node.meta:
             val = node.meta["val"]
-            if hasattr(val, "shape"):
+            if imported_result_type is not None:
+                self.ctx.node_types[node.name] = imported_result_type
+            elif hasattr(val, "shape"):
                 self.ctx.node_types[node.name] = self.ctx.compute_mlir_type_from_fake_tensor(val)
             elif hasattr(val, "dtype"):
                 self.ctx.node_types[node.name] = torch_dtype_to_mlir_element_type(val.dtype)
         return result
-    
+
     def _get_element_type_from_node(self, node: fx.Node) -> str:
         """Extract MLIR element type string from a node's FakeTensor dtype."""
         from .mlir_utils import torch_dtype_to_mlir_element_type
@@ -2393,6 +2397,77 @@ class IRVisitor:
             return self.ctx.compute_mlir_type_from_fake_tensor(fake_tensor)
         
         raise RuntimeError(f"Cannot compute MLIR type for node {name}")
+
+    def _create_precise_import_value(self, node: fx.Node) -> object:
+        """Create a more precise fake value for torch-mlir import.
+
+        Dims that shape_env proves static are materialized as concrete ints.
+        Dims that still depend on block sizes remain symbolic.
+        """
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        val = node.meta.get("val")
+
+        if isinstance(val, torch.Tensor):
+            resolved_shape: list[object] = []
+            for dim_idx, dim_size in enumerate(val.shape):
+                if hasattr(dim_size, "_sympy_"):
+                    dim_value, is_static = self.resolve_dimension(dim_size, dim_idx)
+                    if dim_value is not None and is_static:
+                        resolved_shape.append(int(dim_value))
+                    else:
+                        resolved_shape.append(dim_size)
+                else:
+                    resolved_shape.append(int(dim_size))
+
+            with FakeTensorMode():
+                return torch.empty(resolved_shape, dtype=val.dtype, device="meta")
+
+        if isinstance(val, (tuple, list)):
+            converted = [
+                self._create_precise_import_value_from_meta(elem)
+                for elem in val
+            ]
+            return tuple(converted) if isinstance(val, tuple) else converted
+
+        if isinstance(val, (int, float, bool)):
+            return val
+
+        raise RuntimeError(f"Unsupported import value for node {node.name}: {type(val)}")
+
+    def _create_precise_import_value_from_meta(self, val: object) -> object:
+        """Recursively clone tensor metadata into precise fake tensors."""
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        if isinstance(val, torch.Tensor):
+            resolved_shape: list[object] = []
+            for dim in val.shape:
+                if hasattr(dim, "_sympy_"):
+                    resolved_shape.append(dim)
+                else:
+                    resolved_shape.append(int(dim))
+            with FakeTensorMode():
+                return torch.empty(resolved_shape, dtype=val.dtype, device="meta")
+        if isinstance(val, (tuple, list)):
+            converted = [self._create_precise_import_value_from_meta(elem) for elem in val]
+            return tuple(converted) if isinstance(val, tuple) else converted
+        return val
+
+    @staticmethod
+    def _extract_imported_result_type(mlir_text: str) -> str | None:
+        """Extract the single return type from an imported torch-mlir function."""
+        import re
+
+        for line in mlir_text.splitlines():
+            if "func.func @aten_op" not in line:
+                continue
+            match = re.search(r'\)\s*->\s*(.+?)\s*\{', line)
+            if match:
+                result_type = match.group(1).strip()
+                if result_type.startswith("("):
+                    return None
+                return result_type
+        return None
     
     def _get_hex_constant(self, value: float, dtype_str: str) -> str:
         """Get the hexadecimal representation of inf/nan for a given dtype.
