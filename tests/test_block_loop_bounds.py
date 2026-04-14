@@ -3,7 +3,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
 import torch
 
 import helion
@@ -76,10 +75,15 @@ def test_simple_bound_uses_scf_for_without_affine_apply() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_nonzero_lower_bound_block_loop_is_rejected() -> None:
+def test_nonzero_lower_bound_block_loop_is_supported() -> None:
     x = torch.randn([128, 64], dtype=torch.float16)
     y = torch.randn([64, 128], dtype=torch.float16)
     bound_kernel = _nonzero_lb_matmul.bind((x, y))
 
-    with pytest.raises(ValueError, match="zero-lower-bound block loops"):
-        generate_mlir(bound_kernel)
+    mlir_text = generate_mlir(bound_kernel)
+
+    assert "scf.for" in mlir_text
+    assert "arith.subi" in mlir_text
+    assert "arith.addi" in mlir_text
+    result = validate_with_mlir_opt(mlir_text)
+    assert result.returncode == 0, result.stderr

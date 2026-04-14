@@ -73,6 +73,8 @@ class IRVisitor:
         self.current_block_id: int | None = None  # Current loop's block_id for IV reference
         # Nodes representing contiguous 1-D index ranges (tile_index-based patterns)
         self.range_index_block_ids: dict[str, int] = {}
+        # Active scf.for bounds keyed by canonical block_id.
+        self.loop_bounds: dict[int, tuple[str, str]] = {}
     
     def resolve_dimension(self, dim_size, dim_hint: int = 0) -> tuple[str, bool]:
         """Resolve a dimension size to an SSA value or inline literal.
@@ -740,6 +742,94 @@ class IRVisitor:
         self.mlir_output_helper.emit(f"{result} = arith.ceildivui {lhs}, {rhs} : index")
         return result
 
+    def _emit_index_addi(self, lhs: str, rhs: str, *, hint: str = "idx_add") -> str:
+        result = self.mlir_output_helper.fresh(hint)
+        self.mlir_output_helper.emit(f"{result} = arith.addi {lhs}, {rhs} : index")
+        return result
+
+    def _emit_index_subi(self, lhs: str, rhs: str, *, hint: str = "idx_sub") -> str:
+        result = self.mlir_output_helper.fresh(hint)
+        self.mlir_output_helper.emit(f"{result} = arith.subi {lhs}, {rhs} : index")
+        return result
+
+    def _emit_index_muli(self, lhs: str, rhs: str, *, hint: str = "idx_mul") -> str:
+        result = self.mlir_output_helper.fresh(hint)
+        self.mlir_output_helper.emit(f"{result} = arith.muli {lhs}, {rhs} : index")
+        return result
+
+    def _emit_index_minui(self, lhs: str, rhs: str, *, hint: str = "idx_min") -> str:
+        pred = self.mlir_output_helper.fresh("idx_lt")
+        self.mlir_output_helper.emit(f"{pred} = arith.cmpi ult, {lhs}, {rhs} : index")
+        result = self.mlir_output_helper.fresh(hint)
+        self.mlir_output_helper.emit(f"{result} = arith.select {pred}, {lhs}, {rhs} : index")
+        return result
+
+    def _get_block_loop_iv(self, canonical_block_id: int) -> str:
+        return f"%iv_block_{canonical_block_id}"
+
+    def _get_active_loop_bounds(self, canonical_block_id: int) -> tuple[str, str] | None:
+        return self.loop_bounds.get(canonical_block_id)
+
+    def _emit_block_offset(
+        self,
+        canonical_block_id: int,
+        block_size_ssa: str,
+        *,
+        hint: str = "offset",
+    ) -> str:
+        iv_ssa = self._get_block_loop_iv(canonical_block_id)
+        offset_ssa = self._emit_index_muli(iv_ssa, block_size_ssa, hint=hint)
+        bounds = self._get_active_loop_bounds(canonical_block_id)
+        if bounds is None:
+            return offset_ssa
+        lb_ssa, _ = bounds
+        return self._emit_index_addi(lb_ssa, offset_ssa, hint=f"{hint}_base")
+
+    def _emit_block_end(
+        self,
+        canonical_block_id: int,
+        block_size_ssa: str,
+        *,
+        hint: str = "tile_end",
+    ) -> str:
+        start_ssa = self._emit_block_offset(
+            canonical_block_id,
+            block_size_ssa,
+            hint=f"{hint}_start",
+        )
+        naive_end_ssa = self._emit_index_addi(
+            start_ssa,
+            block_size_ssa,
+            hint=f"{hint}_naive",
+        )
+        bounds = self._get_active_loop_bounds(canonical_block_id)
+        if bounds is None:
+            return naive_end_ssa
+        _, ub_ssa = bounds
+        return self._emit_index_minui(naive_end_ssa, ub_ssa, hint=hint)
+
+    def _emit_block_extent(
+        self,
+        canonical_block_id: int,
+        block_size_ssa: str,
+        *,
+        hint: str = "tile_extent",
+    ) -> str:
+        bounds = self._get_active_loop_bounds(canonical_block_id)
+        if bounds is None:
+            return block_size_ssa
+        start_ssa = self._emit_block_offset(
+            canonical_block_id,
+            block_size_ssa,
+            hint=f"{hint}_start",
+        )
+        end_ssa = self._emit_block_end(
+            canonical_block_id,
+            block_size_ssa,
+            hint=f"{hint}_end",
+        )
+        return self._emit_index_subi(end_ssa, start_ssa, hint=hint)
+
     def _as_index_ssa(self, value: Any) -> str:
         """Materialize an index-typed SSA value from literals/SymInt/FX nodes."""
         if isinstance(value, fx.Node):
@@ -818,10 +908,10 @@ class IRVisitor:
         self.ctx.node_types[node.name] = "index"
         return base_ssa
 
-    def _derive_trip_count_from_for_loop_args(
+    def _derive_loop_trip_info_from_for_loop_args(
         self, node: fx.Node, canonical_block_id: int
-    ) -> str | None:
-        """Primary path: derive loop trip count from FX _for_loop bounds."""
+    ) -> tuple[str, str, str] | None:
+        """Primary path: derive [lb, ub) trip count information from FX _for_loop bounds."""
         if len(node.args) < 3:
             return None
 
@@ -846,12 +936,7 @@ class IRVisitor:
                     f"Only unit-step block loops are supported for now; got step {step!r}"
                 )
 
-        # Phase-1 support: only zero-lower-bound loops.
-        if not isinstance(lb, int) or lb != 0:
-            raise ValueError(
-                f"Only zero-lower-bound block loops are supported for now; got lower bound {lb!r}"
-            )
-
+        lb_ssa = self._as_index_ssa(lb)
         ub_ssa = self._as_index_ssa(ub)
         block_info = self.ctx.env.block_sizes[canonical_block_id]
         if isinstance(block_info.size, int):
@@ -861,12 +946,17 @@ class IRVisitor:
             if tile_size_ssa is None:
                 return None
 
+        extent_ssa = (
+            ub_ssa
+            if isinstance(lb, int) and lb == 0
+            else self._emit_index_subi(ub_ssa, lb_ssa, hint="loop_extent")
+        )
         trip_count_ssa = self._emit_index_ceildivui(
-            ub_ssa,
+            extent_ssa,
             tile_size_ssa,
             hint="trip_count",
         )
-        return trip_count_ssa
+        return (trip_count_ssa, lb_ssa, ub_ssa)
 
     def visit_for_loop(self, node: fx.Node) -> str:
         """Generate scf.for and visit the inner ForLoopGraphInfo."""
@@ -884,9 +974,13 @@ class IRVisitor:
 
         # Primary path: derive trip count from _for_loop FX bounds.
         # Fallback path: use pre-computed metadata trip count.
-        trip_count_ssa = self._derive_trip_count_from_for_loop_args(node, block_id)
-        if trip_count_ssa is None:
+        loop_trip_info = self._derive_loop_trip_info_from_for_loop_args(node, block_id)
+        if loop_trip_info is not None:
+            trip_count_ssa, lb_ssa, ub_ssa = loop_trip_info
+        else:
             trip_count_ssa = self.ctx.reduction_trip_counts.get(block_id)
+            lb_ssa = None
+            ub_ssa = None
         if trip_count_ssa is None:
             raise ValueError("No trip count found for loop")
 
@@ -976,6 +1070,9 @@ class IRVisitor:
 
         old_block_id = self.current_block_id
         self.current_block_id = block_id
+        saved_loop_bounds = self.loop_bounds.copy()
+        if lb_ssa is not None and ub_ssa is not None:
+            self.loop_bounds[block_id] = (lb_ssa, ub_ssa)
 
         # ForLoopGraphInfo nodes are in a separate FX graph and may reuse node
         # names from the parent graph (e.g. tile_begin, mul_1). Keep a local
@@ -999,6 +1096,7 @@ class IRVisitor:
         self.current_block_id = old_block_id
         self.loop_depth -= 1
         self.loop_iter_args = old_loop_iter_args
+        self.loop_bounds = saved_loop_bounds
 
         if isinstance(self.current_loop_result, list) and len(self.current_loop_result) > 1:
             yield_values = ", ".join(self.current_loop_result)
@@ -1272,13 +1370,11 @@ class IRVisitor:
                         sizes.append(("1", True))
                     else:
                         # Range indexing for regular tile blocks.
-                        iv_ssa = f"%iv_block_{block_id}"
-                        offset_ssa = self.mlir_output_helper.fresh("offset")
-                        self.mlir_output_helper.emit(
-                            f'{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index'
-                        )
+                        offset_ssa = self._emit_block_offset(block_id, idx_ssa, hint="offset")
+                        size_ssa = self._emit_block_extent(block_id, idx_ssa, hint="tile_extent")
                         offsets.append((offset_ssa, False))
-                        sizes.append((idx_ssa, False))
+                        size_is_static = not size_ssa.startswith("%")
+                        sizes.append((size_ssa, size_is_static))
                         output_dim_sizes.append(None)  # Dynamic (block sizes are runtime)
                         retained_dim_positions.append(i)
                 else:
@@ -1503,11 +1599,11 @@ class IRVisitor:
                         offsets.append((idx_ssa, not idx_ssa.startswith("%")))
                         sizes.append(("1", True))
                     else:
-                        iv_ssa = f"%iv_block_{block_id}"
-                        offset_ssa = self.mlir_output_helper.fresh("offset")
-                        self.mlir_output_helper.emit(f'{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index')
+                        offset_ssa = self._emit_block_offset(block_id, idx_ssa, hint="offset")
+                        size_ssa = self._emit_block_extent(block_id, idx_ssa, hint="tile_extent")
                         offsets.append((offset_ssa, False))
-                        sizes.append((idx_ssa, False))
+                        size_is_static = not size_ssa.startswith("%")
+                        sizes.append((size_ssa, size_is_static))
                         output_dim_sizes.append(None)  # Dynamic (block sizes are runtime)
                         retained_dim_positions.append(i)
                 else:
@@ -1828,39 +1924,39 @@ class IRVisitor:
         block_id = self._try_get_block_id_from_node(block_size_node)
         if block_id is None:
             raise ValueError(f"Cannot determine block_id for tile_id node {node.name}")
-        iv_ssa = f"%iv_block_{block_id}"
-        self.ctx.node_values[node.name] = iv_ssa
-        return iv_ssa
+        bounds = self._get_active_loop_bounds(block_id)
+        if bounds is None:
+            iv_ssa = self._get_block_loop_iv(block_id)
+            self.ctx.node_values[node.name] = iv_ssa
+            return iv_ssa
+
+        bs_ssa = self.ctx.block_size_ssa[block_id]
+        start_ssa = self._emit_block_offset(block_id, bs_ssa, hint="tile_id_start")
+        tile_id_ssa = self._emit_index_divui(start_ssa, bs_ssa, hint="tile_id")
+        self.ctx.node_values[node.name] = tile_id_ssa
+        return tile_id_ssa
 
     def visit_tile_begin(self, node: fx.Node) -> str:
-        """Map tile_begin(block_size_X) to IV * block_size."""
+        """Map tile_begin(block_size_X) to lb + IV * block_size when active."""
         block_size_node = node.args[0]
         block_id = self._try_get_block_id_from_node(block_size_node)
         if block_id is None:
             raise ValueError(f"Cannot determine block_id for tile_begin node {node.name}")
         canonical_id = self.ctx.resolve_block_id(block_id)
-        iv_ssa = f"%iv_block_{canonical_id}"
         bs_ssa = self.ctx.block_size_ssa[canonical_id]
-        result = self.mlir_output_helper.fresh("tile_begin")
-        self.mlir_output_helper.emit(f'{result} = arith.muli {iv_ssa}, {bs_ssa} : index')
+        result = self._emit_block_offset(canonical_id, bs_ssa, hint="tile_begin")
         self.ctx.node_values[node.name] = result
         return result
 
     def visit_tile_end(self, node: fx.Node) -> str:
-        """Map tile_end(block_size_X) to (IV + 1) * block_size."""
+        """Map tile_end(block_size_X) to min(lb + (IV + 1) * block_size, ub) when active."""
         block_size_node = node.args[0]
         block_id = self._try_get_block_id_from_node(block_size_node)
         if block_id is None:
             raise ValueError(f"Cannot determine block_id for tile_end node {node.name}")
         canonical_id = self.ctx.resolve_block_id(block_id)
-        iv_ssa = f"%iv_block_{canonical_id}"
         bs_ssa = self.ctx.block_size_ssa[canonical_id]
-        one = self.mlir_output_helper.fresh("one")
-        self.mlir_output_helper.emit(f'{one} = arith.constant 1 : index')
-        iv_plus_one = self.mlir_output_helper.fresh("iv_plus_one")
-        self.mlir_output_helper.emit(f'{iv_plus_one} = arith.addi {iv_ssa}, {one} : index')
-        result = self.mlir_output_helper.fresh("tile_end")
-        self.mlir_output_helper.emit(f'{result} = arith.muli {iv_plus_one}, {bs_ssa} : index')
+        result = self._emit_block_end(canonical_id, bs_ssa, hint="tile_end")
         self.ctx.node_values[node.name] = result
         return result
 
