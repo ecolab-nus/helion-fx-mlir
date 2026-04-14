@@ -61,9 +61,9 @@ def split_k_matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 def main() -> None:
-    m, k, n = 256, 4096, 256
-    a = torch.randn([m, k], device="cpu", dtype=torch.float32)
-    b = torch.randn([k, n], device="cpu", dtype=torch.float32)
+    m, k, n = 512, 4096, 512
+    a = torch.randn([m, k], device="cpu", dtype=torch.float16)
+    b = torch.randn([k, n], device="cpu", dtype=torch.float16)
     bound_kernel = split_k_matmul.bind((a, b))
 
     print_debug_info(bound_kernel)

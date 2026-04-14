@@ -32,6 +32,35 @@ import helion.language.creation_ops as hl_creation_ops
 import helion.language.view_ops as hl_view_ops
 import helion.language.tile_ops as hl_tile_ops
 
+_custome_ops_cache: dict | None = None
+
+
+def _get_custome_ops() -> dict:
+    """Lazily load custom ops from custome_op package (optional).
+
+    Returns a dict mapping handler name -> function object.
+    Returns an empty dict if the package is not available.
+
+    Note: ``custome_op/__init__.py`` re-exports ``gather`` from the submodule,
+    which shadows ``custome_op.gather`` (the module) with the function in the
+    package namespace.  We use ``importlib.import_module`` to access the real
+    submodule and retrieve the decorated function object.
+    """
+    global _custome_ops_cache
+    if _custome_ops_cache is not None:
+        return _custome_ops_cache
+
+    import importlib, pathlib, sys
+    custome_op_dir = str(pathlib.Path(__file__).resolve().parents[2])  # helion-mlir root
+    if custome_op_dir not in sys.path:
+        sys.path.insert(0, custome_op_dir)
+    try:
+        mod = importlib.import_module("custome_op.gather")
+        _custome_ops_cache = {"gather": mod.gather}
+    except Exception:
+        _custome_ops_cache = {}
+    return _custome_ops_cache
+
 from .mlir_utils import (
     format_attr_dict,
     format_string_attr,
@@ -267,6 +296,11 @@ class IRVisitor:
         # atomic_add -> memref.subview + loom.sum
         if target is hl_atomic_ops.atomic_add:
             return self.visit_atomic_add(node)
+
+        # gather (custom op) -> loom.gather placeholder
+        _custom = _get_custome_ops()
+        if target is _custom.get("gather"):
+            return self.visit_gather(node)
         
         # tile_id / tile_begin / tile_end -> IV-based SSA
         if target is hl_tile_ops.tile_index:
@@ -1874,7 +1908,83 @@ class IRVisitor:
 
         self.ctx.node_values[node.name] = subview_ssa
         return subview_ssa
-    
+
+    def visit_gather(self, node: fx.Node) -> str:
+        """Emit a ``loom.gather`` placeholder op for the custom gather op.
+
+        gather(tile, src) → tensor<?x*src_shape>
+
+        The leading ``?`` dimension represents the tile-count (trip count of the
+        gathered loop axis).  The op is registered as an *unregistered* dialect
+        op in MLIR; pass ``--allow-unregistered-dialect`` to mlir-opt for
+        validation.
+        """
+        tile_node = node.args[0]
+        src_node = node.args[1]
+
+        if not isinstance(tile_node, fx.Node):
+            raise RuntimeError(
+                f"gather: first arg (tile) must be an fx.Node, got {type(tile_node)}"
+            )
+        if not isinstance(src_node, fx.Node):
+            raise RuntimeError(
+                f"gather: second arg (src) must be an fx.Node, got {type(src_node)}"
+            )
+
+        # Recover the block_id from the tile node.
+        block_id = self._try_get_block_id_from_node(tile_node)
+        if block_id is None:
+            raise RuntimeError(
+                f"gather: cannot determine block_id from tile node '{tile_node.name}'. "
+                "Make sure the first argument is a Tile / block-size symnode."
+            )
+
+        # Trip-count SSA for this reduction/parallel axis.
+        trip_count_ssa = self.ctx.reduction_trip_counts.get(block_id)
+        if trip_count_ssa is None:
+            # Fall back: compute trip count inline.
+            import math
+            info = self.ctx.env.block_sizes[block_id]
+            total_extent = self.ctx.get_loop_extent(block_id)
+            if isinstance(info.size, int):
+                trip_val = max(1, math.ceil(total_extent / info.size))
+                trip_count_ssa = self.mlir_output_helper.fresh("trip_count")
+                self.mlir_output_helper.emit(
+                    f"{trip_count_ssa} = arith.constant {trip_val} : index"
+                )
+            else:
+                tile_size_ssa = self.ctx.block_size_ssa[block_id]
+                extent_ssa = self.mlir_output_helper.fresh("loop_extent")
+                self.mlir_output_helper.emit(
+                    f"{extent_ssa} = arith.constant {total_extent} : index"
+                )
+                trip_count_ssa = self.mlir_output_helper.fresh("trip_count")
+                self.mlir_output_helper.emit(
+                    f"{trip_count_ssa} = arith.ceildivui {extent_ssa}, {tile_size_ssa} : index"
+                )
+
+        src_ssa = self.ctx.node_values.get(src_node.name, f"%{src_node.name}")
+        src_type = self._get_tensor_type(src_node)
+
+        # Build result type: tensor<?x*src_inner_dims>.
+        # src_type is something like tensor<?x?xf16> or tensor<64x64xf16>.
+        if src_type.startswith("tensor<") and src_type.endswith(">"):
+            inner = src_type[len("tensor<"):-1]  # e.g. "?x?xf16"
+            result_type = f"tensor<?x{inner}>"
+        else:
+            # Unexpected type — best-effort fallback.
+            result_type = f"tensor<?x{src_type}>"
+
+        result_ssa = self.mlir_output_helper.fresh("gathered")
+        self.mlir_output_helper.emit(
+            f'{result_ssa} = "loom.gather"({src_ssa}, {trip_count_ssa}) '
+            f': ({src_type}, index) -> {result_type}'
+        )
+
+        self.ctx.node_values[node.name] = result_ssa
+        self.ctx.node_types[node.name] = result_type
+        return result_ssa
+
     def visit_getitem(self, node: fx.Node) -> str:
         """Map getitem to the corresponding loop result.
         
