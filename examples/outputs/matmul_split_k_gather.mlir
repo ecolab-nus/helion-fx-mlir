@@ -3,30 +3,30 @@ Graph 0: IfGraphInfo
 opcode         name            target                                     args                                                       kwargs
 -------------  --------------  -----------------------------------------  ---------------------------------------------------------  --------
 placeholder    arg0_1          arg0_1                                     ()                                                         {}
-call_function  _new_var        <function _new_var at 0x7f47250892d0>      (arg0_1,)                                                  {}
-call_function  block_size_2    <function _get_symnode at 0x7f4725056d40>  ('block_size_2',)                                          {}
-call_function  gathered        <function gather at 0x7f470c2b1f30>        (block_size_2, _new_var)                                   {}
-call_function  _mask_to        <function _mask_to at 0x7f4725088f70>      (gathered, 0)                                              {}
+call_function  _new_var        <function _new_var at 0x7fd835a392d0>      (arg0_1,)                                                  {}
+call_function  block_size_2    <function _get_symnode at 0x7fd835a06d40>  ('block_size_2',)                                          {}
+call_function  gathered        <function gather at 0x7fd826fba4d0>        (block_size_2, _new_var)                                   {}
+call_function  _mask_to        <function _mask_to at 0x7fd835a38f70>      (gathered, 0)                                              {}
 call_function  acc_across_k    aten.sum.dim_IntList                       (_mask_to, [0])                                            {}
-call_function  out             <function _host_tensor at 0x7f47250579a0>  ('out',)                                                   {}
+call_function  out             <function _host_tensor at 0x7fd835a079a0>  ('out',)                                                   {}
 call_function  sym_size_int    aten.sym_size.int                          (arg0_1, 0)                                                {}
 call_function  sym_size_int_1  aten.sym_size.int                          (arg0_1, 1)                                                {}
-call_function  store           <function store at 0x7f470c529900>         (out, [sym_size_int, sym_size_int_1], acc_across_k, None)  {}
+call_function  store           <function store at 0x7fd826f75900>         (out, [sym_size_int, sym_size_int_1], acc_across_k, None)  {}
 output         output          output                                     ([],)                                                      {}
 Graph 1: RootGraphInfo
 opcode         name          target                                     args                                           kwargs
 -------------  ------------  -----------------------------------------  ---------------------------------------------  --------
-call_function  a             <function _host_tensor at 0x7f47250579a0>  ('a',)                                         {}
-call_function  block_size_0  <function _get_symnode at 0x7f4725056d40>  ('block_size_0',)                              {}
-call_function  block_size_2  <function _get_symnode at 0x7f4725056d40>  ('block_size_2',)                              {}
-call_function  load          <function load at 0x7f470c52b520>          (a, [block_size_0, block_size_2], None, None)  {}
-call_function  b             <function _host_tensor at 0x7f47250579a0>  ('b',)                                         {}
-call_function  block_size_1  <function _get_symnode at 0x7f4725056d40>  ('block_size_1',)                              {}
-call_function  load_1        <function load at 0x7f470c52b520>          (b, [block_size_2, block_size_1], None, None)  {}
+call_function  a             <function _host_tensor at 0x7fd835a079a0>  ('a',)                                         {}
+call_function  block_size_0  <function _get_symnode at 0x7fd835a06d40>  ('block_size_0',)                              {}
+call_function  block_size_2  <function _get_symnode at 0x7fd835a06d40>  ('block_size_2',)                              {}
+call_function  load          <function load at 0x7fd826f77520>          (a, [block_size_0, block_size_2], None, None)  {}
+call_function  b             <function _host_tensor at 0x7fd835a079a0>  ('b',)                                         {}
+call_function  block_size_1  <function _get_symnode at 0x7fd835a06d40>  ('block_size_1',)                              {}
+call_function  load_1        <function load at 0x7fd826f77520>          (b, [block_size_2, block_size_1], None, None)  {}
 call_function  local_acc     aten.mm.default                            (load, load_1)                                 {}
-call_function  tile_id       <function tile_id at 0x7f470c5439a0>       (block_size_2,)                                {}
+call_function  tile_id       <function tile_id at 0x7fd826f8f9a0>       (block_size_2,)                                {}
 call_function  eq_2          <built-in function eq>                     (tile_id, 0)                                   {}
-call_function  _if           <function _if at 0x7f47250880d0>           (eq_2, 0, [local_acc])                         {}
+call_function  _if           <function _if at 0x7fd835a380d0>           (eq_2, 0, [local_acc])                         {}
 output         output        output                                     (None,)                                        {}
 
 
@@ -102,20 +102,21 @@ module attributes {loom.tile_m = {upper_bound = 512 : index, is_reduction = fals
       scf.if %cmp23 {
         %loop_extent24 = arith.constant 4096 : index
         %trip_count25 = arith.ceildivui %loop_extent24, %tile_k : index
-        %gathered26 = "loom.gather"(%t20, %trip_count25) : (tensor<?x?xf16>, index) -> tensor<?x?x?xf16>
-        %t27 = arith.constant 0.000000e+00 : f16
-        %t30 = tensor.empty(%tile_m, %tile_n) : tensor<?x?xf16>
-        %t31 = linalg.fill ins(%t27 : f16) outs(%t30 : tensor<?x?xf16>) -> tensor<?x?xf16>
-        %t32 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (d1, d2)>], iterator_types = ["reduction", "parallel", "parallel"]} ins(%gathered26 : tensor<?x?x?xf16>) outs(%t31 : tensor<?x?xf16>) {
-        ^bb0(%blk_arg33: f16, %blk_arg34: f16):
-        %t35 = arith.addf %blk_arg33, %blk_arg34 : f16
-        linalg.yield %t35 : f16
+        %gather_out26 = tensor.empty(%trip_count25, %tile_m, %tile_n) : tensor<?x?x?xf16>
+        %gathered27 = "loom.gather"(%t20, %gather_out26, %iv_block_2) {operand_segment_sizes = array<i32: 1, 1, 1, 0, 0, 0, 0>} : (tensor<?x?xf16>, tensor<?x?x?xf16>, index) -> tensor<?x?x?xf16>
+        %t28 = arith.constant 0.000000e+00 : f16
+        %t31 = tensor.empty(%tile_m, %tile_n) : tensor<?x?xf16>
+        %t32 = linalg.fill ins(%t28 : f16) outs(%t31 : tensor<?x?xf16>) -> tensor<?x?xf16>
+        %t33 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (d1, d2)>], iterator_types = ["reduction", "parallel", "parallel"]} ins(%gathered27 : tensor<?x?x?xf16>) outs(%t32 : tensor<?x?xf16>) {
+        ^bb0(%blk_arg34: f16, %blk_arg35: f16):
+        %t36 = arith.addf %blk_arg34, %blk_arg35 : f16
+        linalg.yield %t36 : f16
         } -> tensor<?x?xf16>
-        %offset36 = arith.muli %iv_block_0, %tile_m : index
-        %offset37 = arith.muli %iv_block_1, %tile_n : index
-        %subview38 = memref.subview %out[%offset36, %offset37][%tile_m, %tile_n][1, 1] : memref<512x512xf16> to memref<?x?xf16, strided<[512, 1], offset: ?>>
-        %value_memref39 = bufferization.to_buffer %t32 : tensor<?x?xf16> to memref<?x?xf16, strided<[512, 1], offset: ?>>
-        memref.copy %value_memref39, %subview38 : memref<?x?xf16, strided<[512, 1], offset: ?>> to memref<?x?xf16, strided<[512, 1], offset: ?>>
+        %offset37 = arith.muli %iv_block_0, %tile_m : index
+        %offset38 = arith.muli %iv_block_1, %tile_n : index
+        %subview39 = memref.subview %out[%offset37, %offset38][%tile_m, %tile_n][1, 1] : memref<512x512xf16> to memref<?x?xf16, strided<[512, 1], offset: ?>>
+        %value_memref40 = bufferization.to_buffer %t33 : tensor<?x?xf16> to memref<?x?xf16, strided<[512, 1], offset: ?>>
+        memref.copy %value_memref40, %subview39 : memref<?x?xf16, strided<[512, 1], offset: ?>> to memref<?x?xf16, strided<[512, 1], offset: ?>>
       }
       affine.yield
     }
