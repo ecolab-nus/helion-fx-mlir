@@ -7,87 +7,86 @@ placeholder    arg1_1        arg1_1                                     ()      
 placeholder    arg2_1        arg2_1                                     ()                                                                           {}
 placeholder    arg3_1        arg3_1                                     ()                                                                           {}
 placeholder    arg4_1        arg4_1                                     ()                                                                           {}
-call_function  _new_var      <function _new_var at 0x7f7d2b821240>      (arg0_1,)                                                                    {}
-call_function  _new_var_1    <function _new_var at 0x7f7d2b821240>      (arg1_1,)                                                                    {}
-call_function  _new_var_2    <function _new_var at 0x7f7d2b821240>      (arg2_1,)                                                                    {}
-call_function  _new_var_3    <function _new_var at 0x7f7d2b821240>      (arg3_1,)                                                                    {}
-call_function  _new_var_4    <function _new_var at 0x7f7d2b821240>      (arg4_1,)                                                                    {}
-call_function  k_view        <function _host_tensor at 0x7f7d2b7ef910>  ('k_view',)                                                                  {}
+call_function  _new_var      <function _new_var at 0x7fcd752091b0>      (arg0_1,)                                                                    {}
+call_function  _new_var_1    <function _new_var at 0x7fcd752091b0>      (arg1_1,)                                                                    {}
+call_function  _new_var_2    <function _new_var at 0x7fcd752091b0>      (arg2_1,)                                                                    {}
+call_function  _new_var_3    <function _new_var at 0x7fcd752091b0>      (arg3_1,)                                                                    {}
+call_function  _new_var_4    <function _new_var at 0x7fcd752091b0>      (arg4_1,)                                                                    {}
+call_function  k_view        <function _host_tensor at 0x7fcd753db880>  ('k_view',)                                                                  {}
 call_function  sym_size_int  aten.sym_size.int                          (arg0_1, 0)                                                                  {}
-call_function  block_size_4  <function _get_symnode at 0x7f7d2b7eecb0>  ('block_size_4',)                                                            {}
-call_function  k             <function load at 0x7f7d1cd77490>          (k_view, [sym_size_int, slice(None, None, None), block_size_4], None, None)  {}
+call_function  block_size_4  <function _get_symnode at 0x7fcd753dac20>  ('block_size_4',)                                                            {}
+call_function  k             <function load at 0x7fcd666af400>          (k_view, [sym_size_int, slice(None, None, None), block_size_4], None, None)  {}
 call_function  qk            aten.bmm.default                           (_new_var, k)                                                                {}
-call_function  _mask_to_2    <function _mask_to at 0x7f7d2b820ee0>      (qk, -inf)                                                                   {}
+call_function  _mask_to_2    <function _mask_to at 0x7fcd75208e50>      (qk, -inf)                                                                   {}
 call_function  amax          aten.amax.default                          (_mask_to_2, [-1])                                                           {}
 call_function  mul           aten.mul.Tensor                            (amax, _new_var_2)                                                           {}
 call_function  m_ij          aten.maximum.default                       (_new_var_1, mul)                                                            {}
 call_function  mul_1         aten.mul.Tensor                            (qk, _new_var_2)                                                             {}
-call_function  subscript     <function subscript at 0x7f7d1cdac670>     (m_ij, [slice(None, None, None), slice(None, None, None), None])             {}
+call_function  subscript     <function subscript at 0x7fcd666e05e0>     (m_ij, [slice(None, None, None), slice(None, None, None), None])             {}
 call_function  qk_1          aten.sub.Tensor                            (mul_1, subscript)                                                           {}
 call_function  exp2          aten.exp2.default                          (qk_1,)                                                                      {}
-call_function  _mask_to_3    <function _mask_to at 0x7f7d2b820ee0>      (exp2, 0)                                                                    {}
+call_function  _mask_to_3    <function _mask_to at 0x7fcd75208e50>      (exp2, 0)                                                                    {}
 call_function  l_ij          aten.sum.dim_IntList                       (_mask_to_3, [-1])                                                           {}
 call_function  sub_1         aten.sub.Tensor                            (_new_var_1, m_ij)                                                           {}
 call_function  alpha         aten.exp2.default                          (sub_1,)                                                                     {}
 call_function  mul_2         aten.mul.Tensor                            (_new_var_3, alpha)                                                          {}
 call_function  l_i           aten.add.Tensor                            (mul_2, l_ij)                                                                {}
-call_function  subscript_1   <function subscript at 0x7f7d1cdac670>     (alpha, [slice(None, None, None), slice(None, None, None), None])            {}
+call_function  subscript_1   <function subscript at 0x7fcd666e05e0>     (alpha, [slice(None, None, None), slice(None, None, None), None])            {}
 call_function  acc           aten.mul.Tensor                            (_new_var_4, subscript_1)                                                    {}
-call_function  v_view        <function _host_tensor at 0x7f7d2b7ef910>  ('v_view',)                                                                  {}
-call_function  v             <function load at 0x7f7d1cd77490>          (v_view, [sym_size_int, block_size_4, slice(None, None, None)], None, None)  {}
+call_function  v_view        <function _host_tensor at 0x7fcd753db880>  ('v_view',)                                                                  {}
+call_function  v             <function load at 0x7fcd666af400>          (v_view, [sym_size_int, block_size_4, slice(None, None, None)], None, None)  {}
 call_function  acc_1         aten.baddbmm.default                       (acc, _mask_to_3, v)                                                         {}
-call_function  m_i           <function _new_var at 0x7f7d2b821240>      (m_ij,)                                                                      {}
+call_function  m_i           <function _new_var at 0x7fcd752091b0>      (m_ij,)                                                                      {}
 output         output        output                                     ([m_i, l_i, acc_1],)                                                         {}
 Graph 1: IfGraphInfo
 opcode         name          target                                     args                                                                                             kwargs
 -------------  ------------  -----------------------------------------  -----------------------------------------------------------------------------------------------  --------
 placeholder    arg0_1        arg0_1                                     ()                                                                                               {}
 placeholder    arg1_1        arg1_1                                     ()                                                                                               {}
-call_function  _new_var      <function _new_var at 0x7f7d2b821240>      (arg0_1,)                                                                                        {}
-call_function  _new_var_1    <function _new_var at 0x7f7d2b821240>      (arg1_1,)                                                                                        {}
-call_function  block_size_1  <function _get_symnode at 0x7f7d2b7eecb0>  ('block_size_1',)                                                                                {}
-call_function  gathered_lse  <function gather at 0x7f7d1cb1a320>        (block_size_1, _new_var)                                                                         {}
-call_function  _mask_to      <function _mask_to at 0x7f7d2b820ee0>      (gathered_lse, -inf)                                                                             {}
+call_function  _new_var      <function _new_var at 0x7fcd752091b0>      (arg0_1,)                                                                                        {}
+call_function  _new_var_1    <function _new_var at 0x7fcd752091b0>      (arg1_1,)                                                                                        {}
+call_function  _mask_to      <function _mask_to at 0x7fcd75208e50>      (_new_var, -inf)                                                                                 {}
 call_function  max_lse       aten.amax.default                          (_mask_to, [0])                                                                                  {}
-call_function  sub           aten.sub.Tensor                            (gathered_lse, max_lse)                                                                          {}
+call_function  sub           aten.sub.Tensor                            (_new_var, max_lse)                                                                              {}
 call_function  weights       aten.exp2.default                          (sub,)                                                                                           {}
-call_function  _mask_to_1    <function _mask_to at 0x7f7d2b820ee0>      (weights, 0)                                                                                     {}
+call_function  _mask_to_1    <function _mask_to at 0x7fcd75208e50>      (weights, 0)                                                                                     {}
 call_function  lse_sum       aten.sum.dim_IntList                       (_mask_to_1, [0])                                                                                {}
 call_function  norm_scale    aten.div.Tensor                            (weights, lse_sum)                                                                               {}
-call_function  gathered_acc  <function gather at 0x7f7d1cb1a320>        (block_size_1, _new_var_1)                                                                       {}
-call_function  subscript     <function subscript at 0x7f7d1cdac670>     (norm_scale, [slice(None, None, None), slice(None, None, None), slice(None, None, None), None])  {}
-call_function  mul           aten.mul.Tensor                            (gathered_acc, subscript)                                                                        {}
-call_function  _mask_to_2    <function _mask_to at 0x7f7d2b820ee0>      (mul, 0)                                                                                         {}
+call_function  subscript     <function subscript at 0x7fcd666e05e0>     (norm_scale, [slice(None, None, None), slice(None, None, None), slice(None, None, None), None])  {}
+call_function  mul           aten.mul.Tensor                            (_new_var_1, subscript)                                                                          {}
+call_function  _mask_to_2    <function _mask_to at 0x7fcd75208e50>      (mul, 0)                                                                                         {}
 call_function  weighted_acc  aten.sum.dim_IntList                       (_mask_to_2, [0])                                                                                {}
-call_function  out           <function _host_tensor at 0x7f7d2b7ef910>  ('out',)                                                                                         {}
-call_function  sym_size_int  aten.sym_size.int                          (arg0_1, 0)                                                                                      {}
-call_function  store         <function store at 0x7f7d1cd75870>         (out, [sym_size_int, slice(None, None, None), slice(None, None, None)], weighted_acc, None)      {}
+call_function  out           <function _host_tensor at 0x7fcd753db880>  ('out',)                                                                                         {}
+call_function  sym_size_int  aten.sym_size.int                          (arg0_1, 1)                                                                                      {}
+call_function  store         <function store at 0x7fcd666ad7e0>         (out, [sym_size_int, slice(None, None, None), slice(None, None, None)], weighted_acc, None)      {}
 output         output        output                                     ([],)                                                                                            {}
 Graph 2: RootGraphInfo
 opcode         name          target                                     args                                                                                    kwargs
 -------------  ------------  -----------------------------------------  --------------------------------------------------------------------------------------  --------
-call_function  qk_scale      <function full at 0x7f7d1cd6acb0>          ([], 0.12751743074602467, torch.float16, None)                                          {}
-call_function  block_size_0  <function _get_symnode at 0x7f7d2b7eecb0>  ('block_size_0',)                                                                       {}
-call_function  m_i           <function full at 0x7f7d1cd6acb0>          ([block_size_0, 32], -inf, torch.float16, None)                                         {}
-call_function  l_i           <function full at 0x7f7d1cd6acb0>          ([block_size_0, 32], 1.0, torch.float16, None)                                          {}
-call_function  acc           <function full at 0x7f7d1cd6acb0>          ([block_size_0, 32, 128], 0.0, torch.float16, None)                                     {}
-call_function  q_view        <function _host_tensor at 0x7f7d2b7ef910>  ('q_view',)                                                                             {}
-call_function  q             <function load at 0x7f7d1cd77490>          (q_view, [block_size_0, slice(None, None, None), slice(None, None, None)], None, None)  {}
-call_function  block_size_1  <function _get_symnode at 0x7f7d2b7eecb0>  ('block_size_1',)                                                                       {}
-call_function  tile_begin    <function tile_begin at 0x7f7d1cd97010>    (block_size_1,)                                                                         {}
-call_function  tile_end      <function tile_end at 0x7f7d1cd97400>      (block_size_1,)                                                                         {}
-call_function  _for_loop     <function _for_loop at 0x7f7d2b7efc70>     (0, [tile_begin], [tile_end], [q, m_i, qk_scale, l_i, acc])                             {}
+call_function  qk_scale      <function full at 0x7fcd6669ec20>          ([], 0.12751743074602467, torch.float16, None)                                          {}
+call_function  block_size_0  <function _get_symnode at 0x7fcd753dac20>  ('block_size_0',)                                                                       {}
+call_function  m_i           <function full at 0x7fcd6669ec20>          ([block_size_0, 32], -inf, torch.float16, None)                                         {}
+call_function  l_i           <function full at 0x7fcd6669ec20>          ([block_size_0, 32], 1.0, torch.float16, None)                                          {}
+call_function  acc           <function full at 0x7fcd6669ec20>          ([block_size_0, 32, 128], 0.0, torch.float16, None)                                     {}
+call_function  q_view        <function _host_tensor at 0x7fcd753db880>  ('q_view',)                                                                             {}
+call_function  q             <function load at 0x7fcd666af400>          (q_view, [block_size_0, slice(None, None, None), slice(None, None, None)], None, None)  {}
+call_function  block_size_1  <function _get_symnode at 0x7fcd753dac20>  ('block_size_1',)                                                                       {}
+call_function  tile_begin    <function tile_begin at 0x7fcd666cef80>    (block_size_1,)                                                                         {}
+call_function  tile_end      <function tile_end at 0x7fcd666cf370>      (block_size_1,)                                                                         {}
+call_function  _for_loop     <function _for_loop at 0x7fcd753dbbe0>     (0, [tile_begin], [tile_end], [q, m_i, qk_scale, l_i, acc])                             {}
 call_function  getitem       <built-in function getitem>                (_for_loop, 0)                                                                          {}
 call_function  getitem_1     <built-in function getitem>                (_for_loop, 1)                                                                          {}
 call_function  getitem_2     <built-in function getitem>                (_for_loop, 2)                                                                          {}
-call_function  _phi          <function _phi at 0x7f7d2b8201f0>          (m_i, getitem)                                                                          {}
-call_function  _phi_1        <function _phi at 0x7f7d2b8201f0>          (l_i, getitem_1)                                                                        {}
-call_function  _phi_2        <function _phi at 0x7f7d2b8201f0>          (acc, getitem_2)                                                                        {}
+call_function  _phi          <function _phi at 0x7fcd75208160>          (m_i, getitem)                                                                          {}
+call_function  _phi_1        <function _phi at 0x7fcd75208160>          (l_i, getitem_1)                                                                        {}
+call_function  _phi_2        <function _phi at 0x7fcd75208160>          (acc, getitem_2)                                                                        {}
 call_function  log2          aten.log2.default                          (_phi_1,)                                                                               {}
 call_function  split_lse     aten.add.Tensor                            (log2, _phi)                                                                            {}
-call_function  tile_id       <function tile_id at 0x7f7d1cd97910>       (block_size_1,)                                                                         {}
+call_function  gathered_lse  <function gather at 0x7fcd66716200>        (block_size_1, split_lse)                                                               {}
+call_function  gathered_acc  <function gather at 0x7fcd66716200>        (block_size_1, _phi_2)                                                                  {}
+call_function  tile_id       <function tile_id at 0x7fcd666cf880>       (block_size_1,)                                                                         {}
 call_function  eq            <built-in function eq>                     (tile_id, 0)                                                                            {}
-call_function  _if           <function _if at 0x7f7d2b820040>           (eq, 1, [split_lse, _phi_2])                                                            {}
+call_function  _if           <function _if at 0x7fcd753dbf40>           (eq, 1, [gathered_lse, gathered_acc])                                                   {}
 output         output        output                                     (None,)                                                                                 {}
 
 
@@ -127,12 +126,10 @@ Node v_view : FakeTensor(..., size=(s30, s4, 128), dtype=torch.float16)
 Node v : FakeTensor(..., size=(u0, u6, 128), dtype=torch.float16)
 Node acc_1 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
 Node m_i : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
-Node arg0_1 : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
-Node arg1_1 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
-Node _new_var : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
-Node _new_var_1 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
-Node block_size_1 : u1
-Node gathered_lse : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node arg0_1 : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node arg1_1 : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
+Node _new_var : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node _new_var_1 : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node _mask_to : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
 Node max_lse : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node sub : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
@@ -140,7 +137,6 @@ Node weights : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
 Node _mask_to_1 : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
 Node lse_sum : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node norm_scale : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
-Node gathered_acc : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node subscript : FakeTensor(..., size=(u1, u0, 32, 1), dtype=torch.float16)
 Node mul : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node _mask_to_2 : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
@@ -166,6 +162,8 @@ Node _phi_1 : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node _phi_2 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
 Node log2 : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node split_lse : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
+Node gathered_lse : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node gathered_acc : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node tile_id : u7
 Node eq : Eq(u7, 0)
 Node _if : []
@@ -204,12 +202,10 @@ Node v_view : FakeTensor(..., size=(s30, s4, 128), dtype=torch.float16)
 Node v : FakeTensor(..., size=(u0, u6, 128), dtype=torch.float16)
 Node acc_1 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
 Node m_i : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
-Node arg0_1 : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
-Node arg1_1 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
-Node _new_var : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
-Node _new_var_1 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
-Node block_size_1 : u1
-Node gathered_lse : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node arg0_1 : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node arg1_1 : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
+Node _new_var : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node _new_var_1 : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node _mask_to : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
 Node max_lse : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node sub : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
@@ -217,7 +213,6 @@ Node weights : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
 Node _mask_to_1 : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
 Node lse_sum : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node norm_scale : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
-Node gathered_acc : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node subscript : FakeTensor(..., size=(u1, u0, 32, 1), dtype=torch.float16)
 Node mul : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node _mask_to_2 : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
@@ -243,6 +238,8 @@ Node _phi_1 : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node _phi_2 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
 Node log2 : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node split_lse : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
+Node gathered_lse : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node gathered_acc : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node tile_id : u7
 Node eq : Eq(u7, 0)
 Node _if : []
@@ -281,12 +278,10 @@ Node v_view : FakeTensor(..., size=(s30, s4, 128), dtype=torch.float16)
 Node v : FakeTensor(..., size=(u0, u6, 128), dtype=torch.float16)
 Node acc_1 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
 Node m_i : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
-Node arg0_1 : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
-Node arg1_1 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
-Node _new_var : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
-Node _new_var_1 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
-Node block_size_1 : u1
-Node gathered_lse : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node arg0_1 : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node arg1_1 : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
+Node _new_var : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node _new_var_1 : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node _mask_to : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
 Node max_lse : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node sub : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
@@ -294,7 +289,6 @@ Node weights : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
 Node _mask_to_1 : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
 Node lse_sum : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node norm_scale : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
-Node gathered_acc : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node subscript : FakeTensor(..., size=(u1, u0, 32, 1), dtype=torch.float16)
 Node mul : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node _mask_to_2 : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
@@ -320,6 +314,8 @@ Node _phi_1 : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node _phi_2 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
 Node log2 : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node split_lse : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
+Node gathered_lse : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node gathered_acc : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node tile_id : u7
 Node eq : Eq(u7, 0)
 Node _if : []
@@ -358,12 +354,10 @@ Node v_view : FakeTensor(..., size=(s30, s4, 128), dtype=torch.float16)
 Node v : FakeTensor(..., size=(u0, u6, 128), dtype=torch.float16)
 Node acc_1 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
 Node m_i : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
-Node arg0_1 : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
-Node arg1_1 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
-Node _new_var : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
-Node _new_var_1 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
-Node block_size_1 : u1
-Node gathered_lse : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node arg0_1 : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node arg1_1 : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
+Node _new_var : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node _new_var_1 : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node _mask_to : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
 Node max_lse : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node sub : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
@@ -371,7 +365,6 @@ Node weights : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
 Node _mask_to_1 : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
 Node lse_sum : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node norm_scale : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
-Node gathered_acc : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node subscript : FakeTensor(..., size=(u1, u0, 32, 1), dtype=torch.float16)
 Node mul : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node _mask_to_2 : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
@@ -397,6 +390,8 @@ Node _phi_1 : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node _phi_2 : FakeTensor(..., size=(u0, 32, 128), dtype=torch.float16)
 Node log2 : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
 Node split_lse : FakeTensor(..., size=(u0, 32), dtype=torch.float16)
+Node gathered_lse : FakeTensor(..., size=(u1, u0, 32), dtype=torch.float16)
+Node gathered_acc : FakeTensor(..., size=(u1, u0, 32, 128), dtype=torch.float16)
 Node tile_id : u7
 Node eq : Eq(u7, 0)
 Node _if : []
@@ -469,119 +464,121 @@ module attributes {loom.tile_b = {is_reduction = false, upper_bound = 16 : index
       %14 = arith.subi %13, %12 : index
       %15 = arith.ceildivui %14, %2 : index
       %16:3 = scf.for %arg6 = %c0 to %15 step %c1 iter_args(%arg7 = %6, %arg8 = %7, %arg9 = %9) -> (tensor<?x32xf16>, tensor<?x32xf16>, tensor<?x32x128xf16>) {
-        %20 = arith.muli %arg6, %2 : index
-        %21 = arith.addi %12, %20 : index
-        %subview_4 = memref.subview %arg0[%10, 0, %21] [%0, 128, %2] [1, 1, 1] : memref<16x128x8192xf16> to memref<?x128x?xf16, strided<[1048576, 8192, 1], offset: ?>>
-        %22 = bufferization.to_tensor %subview_4 : memref<?x128x?xf16, strided<[1048576, 8192, 1], offset: ?>> to tensor<?x128x?xf16>
-        %23 = arith.index_cast %0 : index to i64
-        %24 = arith.cmpi eq, %23, %23 : i64
-        cf.assert %24, "mismatching contracting dimension"
-        %25 = tensor.empty(%0, %2) : tensor<?x32x?xf16>
-        %26 = linalg.fill ins(%cst_0 : f16) outs(%25 : tensor<?x32x?xf16>) -> tensor<?x32x?xf16>
-        %27 = linalg.batch_matmul ins(%11, %22 : tensor<?x32x128xf16>, tensor<?x128x?xf16>) outs(%26 : tensor<?x32x?xf16>) -> tensor<?x32x?xf16>
-        %28 = tensor.empty(%0) : tensor<?x32xi64>
-        %29 = linalg.fill ins(%c0_i64 : i64) outs(%28 : tensor<?x32xi64>) -> tensor<?x32xi64>
-        %30:2 = linalg.generic {indexing_maps = [#map, #map1, #map1], iterator_types = ["parallel", "parallel", "reduction"]} ins(%27 : tensor<?x32x?xf16>) outs(%6, %29 : tensor<?x32xf16>, tensor<?x32xi64>) {
+        %24 = arith.muli %arg6, %2 : index
+        %25 = arith.addi %12, %24 : index
+        %subview_4 = memref.subview %arg0[%10, 0, %25] [%0, 128, %2] [1, 1, 1] : memref<16x128x8192xf16> to memref<?x128x?xf16, strided<[1048576, 8192, 1], offset: ?>>
+        %26 = bufferization.to_tensor %subview_4 : memref<?x128x?xf16, strided<[1048576, 8192, 1], offset: ?>> to tensor<?x128x?xf16>
+        %27 = arith.index_cast %0 : index to i64
+        %28 = arith.cmpi eq, %27, %27 : i64
+        cf.assert %28, "mismatching contracting dimension"
+        %29 = tensor.empty(%0, %2) : tensor<?x32x?xf16>
+        %30 = linalg.fill ins(%cst_0 : f16) outs(%29 : tensor<?x32x?xf16>) -> tensor<?x32x?xf16>
+        %31 = linalg.batch_matmul ins(%11, %26 : tensor<?x32x128xf16>, tensor<?x128x?xf16>) outs(%30 : tensor<?x32x?xf16>) -> tensor<?x32x?xf16>
+        %32 = tensor.empty(%0) : tensor<?x32xi64>
+        %33 = linalg.fill ins(%c0_i64 : i64) outs(%32 : tensor<?x32xi64>) -> tensor<?x32xi64>
+        %34:2 = linalg.generic {indexing_maps = [#map, #map1, #map1], iterator_types = ["parallel", "parallel", "reduction"]} ins(%31 : tensor<?x32x?xf16>) outs(%6, %33 : tensor<?x32xf16>, tensor<?x32xi64>) {
         ^bb0(%in: f16, %out: f16, %out_8: i64):
-          %48 = linalg.index 2 : index
-          %49 = arith.index_cast %48 : index to i64
-          %50 = arith.maximumf %in, %out : f16
-          %51 = arith.cmpf ogt, %in, %out : f16
-          %52 = arith.select %51, %49, %out_8 : i64
-          linalg.yield %50, %52 : f16, i64
+          %52 = linalg.index 2 : index
+          %53 = arith.index_cast %52 : index to i64
+          %54 = arith.maximumf %in, %out : f16
+          %55 = arith.cmpf ogt, %in, %out : f16
+          %56 = arith.select %55, %53, %out_8 : i64
+          linalg.yield %54, %56 : f16, i64
         } -> (tensor<?x32xf16>, tensor<?x32xi64>)
-        %31 = linalg.generic {indexing_maps = [#map2, #map2], iterator_types = ["parallel", "parallel"]} ins(%30#0 : tensor<?x32xf16>) outs(%5 : tensor<?x32xf16>) {
+        %35 = linalg.generic {indexing_maps = [#map2, #map2], iterator_types = ["parallel", "parallel"]} ins(%34#0 : tensor<?x32xf16>) outs(%5 : tensor<?x32xf16>) {
         ^bb0(%in: f16, %out: f16):
-          %48 = arith.mulf %in, %cst_3 : f16
-          linalg.yield %48 : f16
+          %52 = arith.mulf %in, %cst_3 : f16
+          linalg.yield %52 : f16
         } -> tensor<?x32xf16>
-        %32 = linalg.generic {indexing_maps = [#map2, #map2, #map2], iterator_types = ["parallel", "parallel"]} ins(%arg7, %31 : tensor<?x32xf16>, tensor<?x32xf16>) outs(%5 : tensor<?x32xf16>) {
+        %36 = linalg.generic {indexing_maps = [#map2, #map2, #map2], iterator_types = ["parallel", "parallel"]} ins(%arg7, %35 : tensor<?x32xf16>, tensor<?x32xf16>) outs(%5 : tensor<?x32xf16>) {
         ^bb0(%in: f16, %in_8: f16, %out: f16):
-          %48 = arith.cmpf ogt, %in, %in_8 : f16
-          %49 = arith.select %48, %in, %in_8 : f16
-          linalg.yield %49 : f16
+          %52 = arith.cmpf ogt, %in, %in_8 : f16
+          %53 = arith.select %52, %in, %in_8 : f16
+          linalg.yield %53 : f16
         } -> tensor<?x32xf16>
-        %33 = linalg.generic {indexing_maps = [#map, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%27 : tensor<?x32x?xf16>) outs(%25 : tensor<?x32x?xf16>) {
+        %37 = linalg.generic {indexing_maps = [#map, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%31 : tensor<?x32x?xf16>) outs(%29 : tensor<?x32x?xf16>) {
         ^bb0(%in: f16, %out: f16):
-          %48 = arith.mulf %in, %cst_3 : f16
-          linalg.yield %48 : f16
+          %52 = arith.mulf %in, %cst_3 : f16
+          linalg.yield %52 : f16
         } -> tensor<?x32x?xf16>
-        %extracted_slice = tensor.extract_slice %32[0, 0] [%0, 32] [1, 1] : tensor<?x32xf16> to tensor<?x32xf16>
+        %extracted_slice = tensor.extract_slice %36[0, 0] [%0, 32] [1, 1] : tensor<?x32xf16> to tensor<?x32xf16>
         %expanded = tensor.expand_shape %extracted_slice [[0], [1, 2]] output_shape [%0, 32, 1] : tensor<?x32xf16> into tensor<?x32x1xf16>
-        %34 = linalg.generic {indexing_maps = [#map, #map3, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%33, %expanded : tensor<?x32x?xf16>, tensor<?x32x1xf16>) outs(%25 : tensor<?x32x?xf16>) {
+        %38 = linalg.generic {indexing_maps = [#map, #map3, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%37, %expanded : tensor<?x32x?xf16>, tensor<?x32x1xf16>) outs(%29 : tensor<?x32x?xf16>) {
         ^bb0(%in: f16, %in_8: f16, %out: f16):
-          %48 = arith.subf %in, %in_8 : f16
-          linalg.yield %48 : f16
+          %52 = arith.subf %in, %in_8 : f16
+          linalg.yield %52 : f16
         } -> tensor<?x32x?xf16>
-        %35 = linalg.generic {indexing_maps = [#map, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%34 : tensor<?x32x?xf16>) outs(%25 : tensor<?x32x?xf16>) {
+        %39 = linalg.generic {indexing_maps = [#map, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%38 : tensor<?x32x?xf16>) outs(%29 : tensor<?x32x?xf16>) {
         ^bb0(%in: f16, %out: f16):
-          %48 = math.powf %cst, %in : f16
-          linalg.yield %48 : f16
+          %52 = math.powf %cst, %in : f16
+          linalg.yield %52 : f16
         } -> tensor<?x32x?xf16>
-        %36 = linalg.fill ins(%cst_0 : f16) outs(%5 : tensor<?x32xf16>) -> tensor<?x32xf16>
-        %37 = linalg.generic {indexing_maps = [#map, #map1], iterator_types = ["parallel", "parallel", "reduction"]} ins(%35 : tensor<?x32x?xf16>) outs(%36 : tensor<?x32xf16>) {
+        %40 = linalg.fill ins(%cst_0 : f16) outs(%5 : tensor<?x32xf16>) -> tensor<?x32xf16>
+        %41 = linalg.generic {indexing_maps = [#map, #map1], iterator_types = ["parallel", "parallel", "reduction"]} ins(%39 : tensor<?x32x?xf16>) outs(%40 : tensor<?x32xf16>) {
         ^bb0(%in: f16, %out: f16):
-          %48 = arith.addf %in, %out : f16
-          linalg.yield %48 : f16
+          %52 = arith.addf %in, %out : f16
+          linalg.yield %52 : f16
         } -> tensor<?x32xf16>
-        %38 = linalg.generic {indexing_maps = [#map2, #map2, #map2], iterator_types = ["parallel", "parallel"]} ins(%arg7, %32 : tensor<?x32xf16>, tensor<?x32xf16>) outs(%5 : tensor<?x32xf16>) {
+        %42 = linalg.generic {indexing_maps = [#map2, #map2, #map2], iterator_types = ["parallel", "parallel"]} ins(%arg7, %36 : tensor<?x32xf16>, tensor<?x32xf16>) outs(%5 : tensor<?x32xf16>) {
         ^bb0(%in: f16, %in_8: f16, %out: f16):
-          %48 = arith.subf %in, %in_8 : f16
-          linalg.yield %48 : f16
+          %52 = arith.subf %in, %in_8 : f16
+          linalg.yield %52 : f16
         } -> tensor<?x32xf16>
-        %39 = linalg.generic {indexing_maps = [#map2, #map2], iterator_types = ["parallel", "parallel"]} ins(%38 : tensor<?x32xf16>) outs(%5 : tensor<?x32xf16>) {
+        %43 = linalg.generic {indexing_maps = [#map2, #map2], iterator_types = ["parallel", "parallel"]} ins(%42 : tensor<?x32xf16>) outs(%5 : tensor<?x32xf16>) {
         ^bb0(%in: f16, %out: f16):
-          %48 = math.powf %cst, %in : f16
-          linalg.yield %48 : f16
+          %52 = math.powf %cst, %in : f16
+          linalg.yield %52 : f16
         } -> tensor<?x32xf16>
-        %40 = linalg.generic {indexing_maps = [#map2, #map2, #map2], iterator_types = ["parallel", "parallel"]} ins(%arg8, %39 : tensor<?x32xf16>, tensor<?x32xf16>) outs(%5 : tensor<?x32xf16>) {
+        %44 = linalg.generic {indexing_maps = [#map2, #map2, #map2], iterator_types = ["parallel", "parallel"]} ins(%arg8, %43 : tensor<?x32xf16>, tensor<?x32xf16>) outs(%5 : tensor<?x32xf16>) {
         ^bb0(%in: f16, %in_8: f16, %out: f16):
-          %48 = arith.mulf %in, %in_8 : f16
-          linalg.yield %48 : f16
+          %52 = arith.mulf %in, %in_8 : f16
+          linalg.yield %52 : f16
         } -> tensor<?x32xf16>
-        %41 = linalg.generic {indexing_maps = [#map2, #map2, #map2], iterator_types = ["parallel", "parallel"]} ins(%40, %37 : tensor<?x32xf16>, tensor<?x32xf16>) outs(%5 : tensor<?x32xf16>) {
+        %45 = linalg.generic {indexing_maps = [#map2, #map2, #map2], iterator_types = ["parallel", "parallel"]} ins(%44, %41 : tensor<?x32xf16>, tensor<?x32xf16>) outs(%5 : tensor<?x32xf16>) {
         ^bb0(%in: f16, %in_8: f16, %out: f16):
-          %48 = arith.addf %in, %in_8 : f16
-          linalg.yield %48 : f16
+          %52 = arith.addf %in, %in_8 : f16
+          linalg.yield %52 : f16
         } -> tensor<?x32xf16>
-        %extracted_slice_5 = tensor.extract_slice %39[0, 0] [%0, 32] [1, 1] : tensor<?x32xf16> to tensor<?x32xf16>
+        %extracted_slice_5 = tensor.extract_slice %43[0, 0] [%0, 32] [1, 1] : tensor<?x32xf16> to tensor<?x32xf16>
         %expanded_6 = tensor.expand_shape %extracted_slice_5 [[0], [1, 2]] output_shape [%0, 32, 1] : tensor<?x32xf16> into tensor<?x32x1xf16>
-        %42 = linalg.generic {indexing_maps = [#map, #map3, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%arg9, %expanded_6 : tensor<?x32x128xf16>, tensor<?x32x1xf16>) outs(%8 : tensor<?x32x128xf16>) {
+        %46 = linalg.generic {indexing_maps = [#map, #map3, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%arg9, %expanded_6 : tensor<?x32x128xf16>, tensor<?x32x1xf16>) outs(%8 : tensor<?x32x128xf16>) {
         ^bb0(%in: f16, %in_8: f16, %out: f16):
-          %48 = arith.mulf %in, %in_8 : f16
-          linalg.yield %48 : f16
+          %52 = arith.mulf %in, %in_8 : f16
+          linalg.yield %52 : f16
         } -> tensor<?x32x128xf16>
-        %subview_7 = memref.subview %arg1[%10, %21, 0] [%0, %2, 128] [1, 1, 1] : memref<16x8192x128xf16> to memref<?x?x128xf16, strided<[1048576, 128, 1], offset: ?>>
-        %43 = bufferization.to_tensor %subview_7 : memref<?x?x128xf16, strided<[1048576, 128, 1], offset: ?>> to tensor<?x?x128xf16>
-        cf.assert %24, "mismatching contracting dimension"
-        %44 = arith.index_cast %2 : index to i64
-        %45 = arith.cmpi eq, %44, %44 : i64
-        cf.assert %45, "mismatching contracting dimension"
-        %46 = linalg.batch_matmul ins(%35, %43 : tensor<?x32x?xf16>, tensor<?x?x128xf16>) outs(%9 : tensor<?x32x128xf16>) -> tensor<?x32x128xf16>
-        %47 = linalg.generic {indexing_maps = [#map, #map, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%46, %42 : tensor<?x32x128xf16>, tensor<?x32x128xf16>) outs(%8 : tensor<?x32x128xf16>) {
+        %subview_7 = memref.subview %arg1[%10, %25, 0] [%0, %2, 128] [1, 1, 1] : memref<16x8192x128xf16> to memref<?x?x128xf16, strided<[1048576, 128, 1], offset: ?>>
+        %47 = bufferization.to_tensor %subview_7 : memref<?x?x128xf16, strided<[1048576, 128, 1], offset: ?>> to tensor<?x?x128xf16>
+        cf.assert %28, "mismatching contracting dimension"
+        %48 = arith.index_cast %2 : index to i64
+        %49 = arith.cmpi eq, %48, %48 : i64
+        cf.assert %49, "mismatching contracting dimension"
+        %50 = linalg.batch_matmul ins(%39, %47 : tensor<?x32x?xf16>, tensor<?x?x128xf16>) outs(%9 : tensor<?x32x128xf16>) -> tensor<?x32x128xf16>
+        %51 = linalg.generic {indexing_maps = [#map, #map, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%50, %46 : tensor<?x32x128xf16>, tensor<?x32x128xf16>) outs(%8 : tensor<?x32x128xf16>) {
         ^bb0(%in: f16, %in_8: f16, %out: f16):
-          %48 = arith.addf %in, %in_8 : f16
-          linalg.yield %48 : f16
+          %52 = arith.addf %in, %in_8 : f16
+          linalg.yield %52 : f16
         } -> tensor<?x32x128xf16>
-        scf.yield %32, %41, %47 : tensor<?x32xf16>, tensor<?x32xf16>, tensor<?x32x128xf16>
+        scf.yield %36, %45, %51 : tensor<?x32xf16>, tensor<?x32xf16>, tensor<?x32x128xf16>
       }
       %17 = linalg.generic {indexing_maps = [#map2, #map2], iterator_types = ["parallel", "parallel"]} ins(%16#1 : tensor<?x32xf16>) outs(%5 : tensor<?x32xf16>) {
       ^bb0(%in: f16, %out: f16):
-        %20 = math.log2 %in : f16
-        linalg.yield %20 : f16
+        %24 = math.log2 %in : f16
+        linalg.yield %24 : f16
       } -> tensor<?x32xf16>
       %18 = linalg.generic {indexing_maps = [#map2, #map2, #map2], iterator_types = ["parallel", "parallel"]} ins(%17, %16#0 : tensor<?x32xf16>, tensor<?x32xf16>) outs(%5 : tensor<?x32xf16>) {
       ^bb0(%in: f16, %in_4: f16, %out: f16):
-        %20 = arith.addf %in, %in_4 : f16
-        linalg.yield %20 : f16
+        %24 = arith.addf %in, %in_4 : f16
+        linalg.yield %24 : f16
       } -> tensor<?x32xf16>
-      %19 = arith.cmpi eq, %arg5, %c0 : index
-      scf.if %19 {
-        %20 = tensor.empty(%4, %0) : tensor<?x?x32xf16>
-        %21 = "loom.gather"(%18, %20, %arg5) {operandSegmentSizes = array<i32: 1, 1, 1, 0, 0, 0, 0>} : (tensor<?x32xf16>, tensor<?x?x32xf16>, index) -> tensor<?x?x32xf16>
-        %22 = tensor.empty(%0) : tensor<?x32xi64>
-        %23 = linalg.fill ins(%c0_i64 : i64) outs(%22 : tensor<?x32xi64>) -> tensor<?x32xi64>
-        %24:2 = linalg.generic {indexing_maps = [#map, #map4, #map4], iterator_types = ["reduction", "parallel", "parallel"]} ins(%21 : tensor<?x?x32xf16>) outs(%6, %23 : tensor<?x32xf16>, tensor<?x32xi64>) {
+      %19 = tensor.empty(%4, %0) : tensor<?x?x32xf16>
+      %20 = "loom.gather"(%18, %19, %arg5) {operandSegmentSizes = array<i32: 1, 1, 1, 0, 0, 0, 0>} : (tensor<?x32xf16>, tensor<?x?x32xf16>, index) -> tensor<?x?x32xf16>
+      %21 = tensor.empty(%4, %0) : tensor<?x?x32x128xf16>
+      %22 = "loom.gather"(%16#2, %21, %arg5) {operandSegmentSizes = array<i32: 1, 1, 1, 0, 0, 0, 0>} : (tensor<?x32x128xf16>, tensor<?x?x32x128xf16>, index) -> tensor<?x?x32x128xf16>
+      %23 = arith.cmpi eq, %arg5, %c0 : index
+      scf.if %23 {
+        %24 = tensor.empty(%0) : tensor<?x32xi64>
+        %25 = linalg.fill ins(%c0_i64 : i64) outs(%24 : tensor<?x32xi64>) -> tensor<?x32xi64>
+        %26:2 = linalg.generic {indexing_maps = [#map, #map4, #map4], iterator_types = ["reduction", "parallel", "parallel"]} ins(%20 : tensor<?x?x32xf16>) outs(%6, %25 : tensor<?x32xf16>, tensor<?x32xi64>) {
         ^bb0(%in: f16, %out: f16, %out_5: i64):
           %36 = linalg.index 0 : index
           %37 = arith.index_cast %36 : index to i64
@@ -590,34 +587,32 @@ module attributes {loom.tile_b = {is_reduction = false, upper_bound = 16 : index
           %40 = arith.select %39, %37, %out_5 : i64
           linalg.yield %38, %40 : f16, i64
         } -> (tensor<?x32xf16>, tensor<?x32xi64>)
-        %25 = linalg.generic {indexing_maps = [#map, #map4, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%21, %24#0 : tensor<?x?x32xf16>, tensor<?x32xf16>) outs(%20 : tensor<?x?x32xf16>) {
+        %27 = linalg.generic {indexing_maps = [#map, #map4, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%20, %26#0 : tensor<?x?x32xf16>, tensor<?x32xf16>) outs(%19 : tensor<?x?x32xf16>) {
         ^bb0(%in: f16, %in_5: f16, %out: f16):
           %36 = arith.subf %in, %in_5 : f16
           linalg.yield %36 : f16
         } -> tensor<?x?x32xf16>
-        %26 = linalg.generic {indexing_maps = [#map, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%25 : tensor<?x?x32xf16>) outs(%20 : tensor<?x?x32xf16>) {
+        %28 = linalg.generic {indexing_maps = [#map, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%27 : tensor<?x?x32xf16>) outs(%19 : tensor<?x?x32xf16>) {
         ^bb0(%in: f16, %out: f16):
           %36 = math.powf %cst, %in : f16
           linalg.yield %36 : f16
         } -> tensor<?x?x32xf16>
-        %27 = linalg.fill ins(%cst_0 : f16) outs(%5 : tensor<?x32xf16>) -> tensor<?x32xf16>
-        %28 = linalg.generic {indexing_maps = [#map, #map4], iterator_types = ["reduction", "parallel", "parallel"]} ins(%26 : tensor<?x?x32xf16>) outs(%27 : tensor<?x32xf16>) {
+        %29 = linalg.fill ins(%cst_0 : f16) outs(%5 : tensor<?x32xf16>) -> tensor<?x32xf16>
+        %30 = linalg.generic {indexing_maps = [#map, #map4], iterator_types = ["reduction", "parallel", "parallel"]} ins(%28 : tensor<?x?x32xf16>) outs(%29 : tensor<?x32xf16>) {
         ^bb0(%in: f16, %out: f16):
           %36 = arith.addf %in, %out : f16
           linalg.yield %36 : f16
         } -> tensor<?x32xf16>
-        %29 = linalg.generic {indexing_maps = [#map, #map4, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%26, %28 : tensor<?x?x32xf16>, tensor<?x32xf16>) outs(%20 : tensor<?x?x32xf16>) {
+        %31 = linalg.generic {indexing_maps = [#map, #map4, #map], iterator_types = ["parallel", "parallel", "parallel"]} ins(%28, %30 : tensor<?x?x32xf16>, tensor<?x32xf16>) outs(%19 : tensor<?x?x32xf16>) {
         ^bb0(%in: f16, %in_5: f16, %out: f16):
           %36 = arith.divf %in, %in_5 : f16
           linalg.yield %36 : f16
         } -> tensor<?x?x32xf16>
-        %30 = tensor.empty(%4, %0) : tensor<?x?x32x128xf16>
-        %31 = "loom.gather"(%16#2, %30, %arg5) {operandSegmentSizes = array<i32: 1, 1, 1, 0, 0, 0, 0>} : (tensor<?x32x128xf16>, tensor<?x?x32x128xf16>, index) -> tensor<?x?x32x128xf16>
-        %extracted_slice = tensor.extract_slice %29[0, 0, 0] [%4, %0, 32] [1, 1, 1] : tensor<?x?x32xf16> to tensor<?x?x32xf16>
+        %extracted_slice = tensor.extract_slice %31[0, 0, 0] [%4, %0, 32] [1, 1, 1] : tensor<?x?x32xf16> to tensor<?x?x32xf16>
         %expanded = tensor.expand_shape %extracted_slice [[0], [1], [2, 3]] output_shape [%4, %0, 32, 1] : tensor<?x?x32xf16> into tensor<?x?x32x1xf16>
         %32 = arith.cmpi eq, %4, %4 : index
         cf.assert %32, "mismatched size for broadcast"
-        %33 = linalg.generic {indexing_maps = [#map5, #map6, #map5], iterator_types = ["parallel", "parallel", "parallel", "parallel"]} ins(%31, %expanded : tensor<?x?x32x128xf16>, tensor<?x?x32x1xf16>) outs(%30 : tensor<?x?x32x128xf16>) {
+        %33 = linalg.generic {indexing_maps = [#map5, #map6, #map5], iterator_types = ["parallel", "parallel", "parallel", "parallel"]} ins(%22, %expanded : tensor<?x?x32x128xf16>, tensor<?x?x32x1xf16>) outs(%21 : tensor<?x?x32x128xf16>) {
         ^bb0(%in: f16, %in_5: f16, %out: f16):
           %36 = arith.mulf %in, %in_5 : f16
           linalg.yield %36 : f16

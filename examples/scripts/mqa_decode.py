@@ -92,15 +92,16 @@ def flash_decode(
         
         split_lse = torch.log2(l_i) + m_i
 
+        # Gather split_lse and acc across all tile_s
+        gathered_lse = gather(tile_s, split_lse) # [N, tile_b, num_q_head]
+        gathered_acc = gather(tile_s, acc) # [N, tile_b, num_q_head, head_dim]
+
         # (2) Inter-block softmax merge
         if tile_s.id == 0:
-            gathered_lse = gather(tile_s, split_lse) # [N, tile_b, num_q_head]
             max_lse = torch.amax(gathered_lse, 0)
             weights = torch.exp2(gathered_lse - max_lse)
             lse_sum = torch.sum(weights, 0)
             norm_scale = weights / lse_sum
-            
-            gathered_acc = gather(tile_s, acc) # [N, tile_b, num_q_head, head_dim]
             weighted_acc = torch.sum(gathered_acc * norm_scale[:, :, :, None], 0)
             out[tile_b, :, :] = weighted_acc
 

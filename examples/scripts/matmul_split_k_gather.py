@@ -58,8 +58,8 @@ def split_k_matmul_gather(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         local_acc = torch.mm(a[tile_m, tile_k], b[tile_k, tile_n])
         # Gather partial results from all tile_k iterations.
         # Lowering emits a ``loom.gather`` placeholder MLIR op.
+        gathered = gather(tile_k, local_acc)
         if tile_k.id == 0:
-            gathered = gather(tile_k, local_acc)
             acc_across_k = torch.sum(gathered, 0)
             out[tile_m, tile_n] = acc_across_k
 
