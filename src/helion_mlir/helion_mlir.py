@@ -58,6 +58,7 @@ def generate_mlir(
     bound_kernel: "BoundKernel",
     *,
     cleanup: bool = True,
+    assume_divisible_tiles: bool = False,
 ) -> str:
     """Generate MLIR by walking Device IR instruction-by-instruction.
 
@@ -85,7 +86,7 @@ def generate_mlir(
     # ------------------------------------------------------------------
     # 1. Create lowering context
     # ------------------------------------------------------------------
-    ctx = LoweringContext(bound_kernel)
+    ctx = LoweringContext(bound_kernel, assume_divisible_tiles=assume_divisible_tiles)
     builder = ctx.mlir_output_helper
     device_ir = bound_kernel.host_function.device_ir
 

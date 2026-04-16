@@ -105,13 +105,22 @@ class IRVisitor:
         # Active scf.for bounds keyed by canonical block_id.
         self.loop_bounds: dict[int, tuple[str, str]] = {}
     
-    def resolve_dimension(self, dim_size, dim_hint: int = 0) -> tuple[str, bool]:
+    def resolve_dimension(self, dim_size, dim_hint: int = 0, overrides: dict[int, str] | None = None) -> tuple[str, bool]:
         """Resolve a dimension size to an SSA value or inline literal.
 
         Block IDs are resolved through the alias map so that dimensions
         coming from the same source across grids share the same SSA.
+        
+        Args:
+            dim_size: The dimension size to resolve (int or sympy expression)
+            dim_hint: The dimension index (used for overrides)
+            overrides: Optional mapping of dim_index -> SSA string
         """
         from helion._compiler.variable_origin import BlockSizeOrigin
+
+        # Check overrides first if dimension index is provided
+        if overrides and dim_hint in overrides:
+             return (overrides[dim_hint], False)
 
         if not hasattr(dim_size, '_sympy_'):
             return (str(int(dim_size)), True)
@@ -837,7 +846,7 @@ class IRVisitor:
             hint=f"{hint}_naive",
         )
         bounds = self._get_active_loop_bounds(canonical_block_id)
-        if bounds is None:
+        if bounds is None or self.ctx.assume_divisible_tiles:
             return naive_end_ssa
         _, ub_ssa = bounds
         return self._emit_index_minui(naive_end_ssa, ub_ssa, hint=hint)
@@ -849,6 +858,8 @@ class IRVisitor:
         *,
         hint: str = "tile_extent",
     ) -> str:
+        if self.ctx.assume_divisible_tiles:
+            return block_size_ssa
         bounds = self._get_active_loop_bounds(canonical_block_id)
         if bounds is None:
             return block_size_ssa
@@ -1409,7 +1420,13 @@ class IRVisitor:
                         offsets.append((offset_ssa, False))
                         size_is_static = not size_ssa.startswith("%")
                         sizes.append((size_ssa, size_is_static))
-                        output_dim_sizes.append(None)  # Dynamic (block sizes are runtime)
+                        if size_is_static:
+                            try:
+                                output_dim_sizes.append(int(size_ssa))
+                            except ValueError:
+                                output_dim_sizes.append(None)
+                        else:
+                            output_dim_sizes.append(None)
                         retained_dim_positions.append(i)
                 else:
                     # Generic scalar index - rank-reduce this dimension.
@@ -1638,7 +1655,13 @@ class IRVisitor:
                         offsets.append((offset_ssa, False))
                         size_is_static = not size_ssa.startswith("%")
                         sizes.append((size_ssa, size_is_static))
-                        output_dim_sizes.append(None)  # Dynamic (block sizes are runtime)
+                        if size_is_static:
+                            try:
+                                output_dim_sizes.append(int(size_ssa))
+                            except ValueError:
+                                output_dim_sizes.append(None)
+                        else:
+                            output_dim_sizes.append(None)
                         retained_dim_positions.append(i)
                 else:
                     # Generic scalar index - rank-reduce this dimension.
@@ -1823,14 +1846,18 @@ class IRVisitor:
                         offsets.append((idx_ssa, not idx_ssa.startswith("%")))
                         sizes.append(("1", True))
                     else:
-                        iv_ssa = f"%iv_block_{block_id}"
-                        offset_ssa = self.mlir_output_helper.fresh("offset")
-                        self.mlir_output_helper.emit(
-                            f"{offset_ssa} = arith.muli {iv_ssa}, {idx_ssa} : index"
-                        )
+                        offset_ssa = self._emit_block_offset(block_id, idx_ssa, hint="offset")
+                        size_ssa = self._emit_block_extent(block_id, idx_ssa, hint="tile_extent")
                         offsets.append((offset_ssa, False))
-                        sizes.append((idx_ssa, False))
-                        output_dim_sizes.append(None)
+                        size_is_static = not size_ssa.startswith("%")
+                        sizes.append((size_ssa, size_is_static))
+                        if size_is_static:
+                            try:
+                                output_dim_sizes.append(int(size_ssa))
+                            except ValueError:
+                                output_dim_sizes.append(None)
+                        else:
+                            output_dim_sizes.append(None)
                         retained_dim_positions.append(i)
                 else:
                     offsets.append((idx_ssa, False))
@@ -2064,6 +2091,8 @@ class IRVisitor:
 
         self.ctx.node_values[node.name] = result_ssa
         self.ctx.node_types[node.name] = result_type
+        # Register that dim-0 of the gathered result is the trip count, not block_size.
+        self.ctx.gather_dim_overrides[node.name] = {0: trip_count_ssa}
         return result_ssa
 
     def visit_getitem(self, node: fx.Node) -> str:
@@ -2241,6 +2270,9 @@ class IRVisitor:
         # Just pass through the input tensor
         if isinstance(tensor_node, fx.Node):
             ssa = self.ctx.node_values.get(tensor_node.name, f"%{tensor_node.name}")
+            # Propagate gather_dim_overrides
+            if tensor_node.name in self.ctx.gather_dim_overrides:
+                self.ctx.gather_dim_overrides[node.name] = self.ctx.gather_dim_overrides[tensor_node.name]
         else:
             ssa = str(tensor_node)
         
@@ -2279,6 +2311,8 @@ class IRVisitor:
         # Default intermediate type is source type
         extracted_type = source_type
         
+        source_dim_for_extracted = [] # Track which source dims were preserved
+        
         if needs_slicing:
             offsets_ssa = []
             sizes_ssa = []
@@ -2300,7 +2334,9 @@ class IRVisitor:
                     dim_resolved = None
                     if source_fake_tensor is not None and input_dim_idx < source_fake_tensor.ndim:
                         dim_size = source_fake_tensor.size(input_dim_idx)
-                        value_str, is_static = self.resolve_dimension(dim_size, input_dim_idx)
+                        # Pass gather_dim_overrides for the source tensor
+                        overrides = self.ctx.gather_dim_overrides.get(tensor_node.name)
+                        value_str, is_static = self.resolve_dimension(dim_size, input_dim_idx, overrides=overrides)
                         if value_str is not None:
                             dim_resolved = value_str
                     
@@ -2314,6 +2350,7 @@ class IRVisitor:
                     
                     sizes_ssa.append(dim_resolved)
                     strides_ssa.append("1")  # Default stride 1
+                    source_dim_for_extracted.append(input_dim_idx)
                     input_dim_idx += 1
                     
                 elif isinstance(idx, int) or isinstance(idx, fx.Node):
@@ -2334,9 +2371,6 @@ class IRVisitor:
             
             # Build result dims: static literal when the size is known at compile
             # time (resolve_dimension returned a non-SSA value), '?' otherwise.
-            # Using '?' for a dimension whose size_ssa is a static literal causes
-            # a type mismatch when downstream ops (expand_shape, linalg) infer the
-            # static size from the literal.
             result_dims = []
             sizes_iter = iter(sizes_ssa)
             for idx in slice_indices:
@@ -2344,8 +2378,7 @@ class IRVisitor:
                 if isinstance(idx, slice):
                     # Keep this dimension; use the literal when static.
                     result_dims.append(size_val if not size_val.startswith("%") else "?")
-                # Integer-indexed dimensions are rank-reduced (dropped from result).
-
+                    
             # Derive dtype from source FakeTensor
             source_dtype = self._get_element_type_from_node(tensor_node)
             dims_str = "x".join(result_dims)
@@ -2364,7 +2397,11 @@ class IRVisitor:
             )
             
             extracted_ssa = result_slice
-        
+        else:
+             # If no slicing, we still need to track preserved dims (all of them)
+             if source_fake_tensor is not None:
+                  source_dim_for_extracted = list(range(source_fake_tensor.ndim))
+
         # -----------------------------------------------------------
         # Step 2: Handle New Axis (tensor.expand_shape)
         # -----------------------------------------------------------
@@ -2372,121 +2409,64 @@ class IRVisitor:
         has_newaxis = any(idx is None for idx in indices)
         
         if has_newaxis:
-            # -----------------------------------------------------------------
-            # Build reassociation map for tensor.expand_shape
-            # -----------------------------------------------------------------
-            # tensor.expand_shape requires a reassociation map that groups
-            # output dimensions back to input dimensions. For newaxis (None):
-            # - Each None adds a size-1 dimension that didn't exist in input
-            # - These new dims must be grouped with real dims from input
-            # 
-            # Strategy: attach each 'new' dimension to the NEXT real dimension
-            # in the output. If no next real dim, attach to the last one.
-            #
-            # Example: indices = [slice, None, slice, None]
-            #   output_dim_types = ['real', 'new', 'real', 'new']
-            #   input_dim_assignments: {0: [0], 1: [1, 2, 3]} (expanded: [[0], [1,2,3]])
-            # -----------------------------------------------------------------
             output_dim_types = [] 
             for idx in indices:
                 if isinstance(idx, slice):
                     output_dim_types.append('real')
                 elif idx is None:
                     output_dim_types.append('new')
-                # ints are ignored/dropped
             
             input_dim_assignments = {} # int -> list[int]
-            
-            # Pass 1: map 'real' output dims to input dims
             real_dim_counter = 0
-            real_output_indices = []
             for i, dtype in enumerate(output_dim_types):
                 if dtype == 'real':
                     input_dim_assignments[real_dim_counter] = [i]
-                    real_output_indices.append(i)
                     real_dim_counter += 1
             
-            # Pass 2: distribute 'new' dims
             for i, dtype in enumerate(output_dim_types):
                 if dtype == 'new':
-                    # Attach to NEXT real dim group
                     found_next = False
                     target_input_dim = -1
-                    
                     for k in range(real_dim_counter):
-                        # If the real dim associated with input K is AFTER current 'new' dim i
                         if input_dim_assignments[k][0] > i:
                             target_input_dim = k
                             break
-                    
                     if target_input_dim != -1:
-                        input_dim_assignments[target_input_dim].insert(0, i) # Prepend to that group
+                        input_dim_assignments[target_input_dim].insert(0, i)
                         found_next = True
-                    
                     if not found_next:
-                        # Attach to last input dim
                         last_input = real_dim_counter - 1
                         if last_input >= 0:
                             input_dim_assignments[last_input].append(i)
             
-            # Flatten to list
             reassoc_list = []
             for k in range(real_dim_counter):
                 reassoc_list.append(input_dim_assignments[k])
-                
             reassoc_str = "[" + ", ".join(["[" + ", ".join(map(str, grp)) + "]" for grp in reassoc_list]) + "]"
             
             source_dtype = self._get_element_type_from_node(tensor_node)
             result_expand = self.mlir_output_helper.fresh("expand")
-
-            # Compute output_shape and result_dims in a single pass so that
-            # static dimensions resolved via resolve_dimension (e.g. from
-            # hl.specialize) are reflected consistently in both the
-            # output_shape operand list and the result tensor type.
-            # Previously result_dims was built separately and always used '?'
-            # for real dimensions, causing a type mismatch when output_shape
-            # contained a static literal (e.g. '32' vs '?').
             output_shape_ssas = []
             result_dims = []
-            extracted_dim_idx = 0  # Track which dimension of extracted_ssa we're on
-
-            # Get source FakeTensor for dimension resolution
-            source_fake_tensor = tensor_node.meta.get("val") if isinstance(tensor_node, fx.Node) else None
-
-            # Build mapping from extracted dims to source dims (accounting for integer indexing)
-            # slice_indices already excludes None, so:
-            # - Each slice contributes one dim (maps to source dim)
-            # - Each int contributes one dim that is size 1 (rank-reducing)
-            source_dim_for_extracted = []
-            src_dim = 0
-            for idx in slice_indices:
-                if isinstance(idx, slice):
-                    source_dim_for_extracted.append(src_dim)
-                    src_dim += 1
-                elif isinstance(idx, int) or isinstance(idx, fx.Node):
-                    # Integer indexing - size is 1, but still consumes a source dim
-                    source_dim_for_extracted.append(src_dim)
-                    src_dim += 1
+            extracted_dim_idx = 0 
 
             for i, dtype in enumerate(output_dim_types):
                 if dtype == 'new':
-                    # New dimension from None - always size 1 (inline literal)
                     output_shape_ssas.append("1")
                     result_dims.append("1")
                 else:
-                    # Real dimension - try to resolve from source FakeTensor
                     dim_resolved = None
                     is_static = False
                     if source_fake_tensor is not None and extracted_dim_idx < len(source_dim_for_extracted):
                         source_dim = source_dim_for_extracted[extracted_dim_idx]
                         if source_dim < source_fake_tensor.ndim:
                             dim_size = source_fake_tensor.size(source_dim)
-                            value_str, is_static = self.resolve_dimension(dim_size, source_dim)
+                            overrides = self.ctx.gather_dim_overrides.get(tensor_node.name)
+                            value_str, is_static = self.resolve_dimension(dim_size, source_dim, overrides=overrides)
                             if value_str is not None:
                                 dim_resolved = value_str
 
                     if dim_resolved is None:
-                        # Fallback to tensor.dim
                         dim_idx_ssa = self.mlir_output_helper.fresh("dim_idx")
                         dim_ssa = self.mlir_output_helper.fresh("dim")
                         self.mlir_output_helper.emit(f'{dim_idx_ssa} = arith.constant {extracted_dim_idx} : index')
@@ -2494,8 +2474,6 @@ class IRVisitor:
                         dim_resolved = dim_ssa
                         result_dims.append("?")
                     else:
-                        # Use static value in type when the dimension is known at
-                        # compile time; otherwise keep it dynamic ('?').
                         result_dims.append(dim_resolved if is_static else "?")
 
                     output_shape_ssas.append(dim_resolved)
@@ -2504,20 +2482,38 @@ class IRVisitor:
             dims_str = "x".join(result_dims)
             result_type = f"tensor<{dims_str}x{source_dtype}>"
             
-            output_shape_str = "[" + ", ".join(output_shape_ssas) + "]"
-            
-            self.mlir_output_helper.emit(
-                f'{result_expand} = tensor.expand_shape {extracted_ssa} {reassoc_str} '
-                f'output_shape {output_shape_str} : '
-                f'{extracted_type} into {result_type}'
-            )
-            
+            # Propagate gather_dim_overrides
+            source_overrides = self.ctx.gather_dim_overrides.get(tensor_node.name)
+            if source_overrides:
+                result_overrides = {}
+                real_idx = 0
+                for i, otype in enumerate(output_dim_types):
+                    if otype == 'real':
+                        src_dim = source_dim_for_extracted[real_idx]
+                        if src_dim in source_overrides:
+                            result_overrides[i] = source_overrides[src_dim]
+                        real_idx += 1
+                if result_overrides:
+                    self.ctx.gather_dim_overrides[node.name] = result_overrides
+
+            self.mlir_output_helper.emit(f'{result_expand} = tensor.expand_shape {extracted_ssa} {reassoc_str} output_shape [{", ".join(output_shape_ssas)}] : {extracted_type} into {result_type}')
             self.ctx.node_values[node.name] = result_expand
+            self.ctx.node_types[node.name] = result_type
             return result_expand
-            
-        else:
-            self.ctx.node_values[node.name] = extracted_ssa
-            return extracted_ssa
+        
+        self.ctx.node_values[node.name] = extracted_ssa
+        self.ctx.node_types[node.name] = extracted_type
+        
+        # Propagate overrides for Step 1 result
+        source_overrides = self.ctx.gather_dim_overrides.get(tensor_node.name)
+        if source_overrides:
+            result_overrides = {}
+            for i, src_dim in enumerate(source_dim_for_extracted):
+                 if src_dim in source_overrides:
+                      result_overrides[i] = source_overrides[src_dim]
+            if result_overrides:
+                 self.ctx.gather_dim_overrides[node.name] = result_overrides
+        return extracted_ssa
     
     def visit_aten_compute(self, node: fx.Node) -> str:
         """Generate MLIR for ATen compute ops using torch-mlir.
@@ -2605,11 +2601,16 @@ class IRVisitor:
                         if isinstance(block_info.size, int):
                             dim_ssas.append(str(block_info.size))
                         else:
-                            ssa = self.ctx.block_size_ssa.get(canonical_id)
-                            if ssa:
-                                dim_ssas.append(ssa)
+                            # Check gather_dim_overrides first
+                            overrides = self.ctx.gather_dim_overrides.get(operand_node.name)
+                            if overrides and dim_idx in overrides:
+                                dim_ssas.append(overrides[dim_idx])
                             else:
-                                dim_ssas.append(None)
+                                ssa = self.ctx.block_size_ssa.get(canonical_id)
+                                if ssa:
+                                    dim_ssas.append(ssa)
+                                else:
+                                    dim_ssas.append(None)
                     else:
                         if sym in shape_env.var_to_val:
                             concrete_val = int(shape_env.var_to_val[sym])
@@ -2652,6 +2653,31 @@ class IRVisitor:
                 self.ctx.node_types[node.name] = self.ctx.compute_mlir_type_from_fake_tensor(val)
             elif hasattr(val, "dtype"):
                 self.ctx.node_types[node.name] = torch_dtype_to_mlir_element_type(val.dtype)
+            
+            # Propagate gather_dim_overrides from inputs to outputs
+            if hasattr(val, 'shape'):
+                output_overrides = {}
+                for dim_idx, dim_size in enumerate(val.shape):
+                    if hasattr(dim_size, '_sympy_'):
+                        sym = dim_size._sympy_()
+                        # Check if any input operand has an override for this symbol
+                        for op_node in tensor_operand_nodes:
+                            if not isinstance(op_node, fx.Node):
+                                continue
+                            op_val = op_node.meta.get("val")
+                            if op_val is None or not hasattr(op_val, 'shape'):
+                                continue
+                            for inp_dim, inp_size in enumerate(op_val.shape):
+                                if hasattr(inp_size, '_sympy_') and inp_size._sympy_() == sym:
+                                    overrides = self.ctx.gather_dim_overrides.get(op_node.name)
+                                    if overrides and inp_dim in overrides:
+                                        output_overrides[dim_idx] = overrides[inp_dim]
+                                        break
+                            if dim_idx in output_overrides:
+                                break
+                if output_overrides:
+                    self.ctx.gather_dim_overrides[node.name] = output_overrides
+                    
         return result
 
     def _get_element_type_from_node(self, node: fx.Node) -> str:

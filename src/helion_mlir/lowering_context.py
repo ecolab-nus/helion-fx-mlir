@@ -36,15 +36,17 @@ class LoweringContext:
     values directly from bound_kernel, avoiding redundant storage.
     """
     
-    def __init__(self, bound_kernel: Any):
+    def __init__(self, bound_kernel: Any, assume_divisible_tiles: bool = False):
         """Initialize a LoweringContext from a bound Helion kernel.
         
         Args:
             bound_kernel: The bound Helion kernel
+            assume_divisible_tiles: Whether to skip OOB checks during tiling
         """
         import torch
         
         self.bound_kernel = bound_kernel
+        self.assume_divisible_tiles = assume_divisible_tiles
         self.mlir_output_helper = MLIROutputHelper()
         # Always output linalg-on-tensors for now as per user request
         
@@ -105,6 +107,11 @@ class LoweringContext:
         # Maps tensor name -> MLIR type string (e.g., "tensor<128x128xf32>")
         self.host_tensor_types: dict[str, str] = {}
         self._precompute_host_tensor_types()
+
+        # Gather dimension overrides: maps gathered node name -> {dim_index: ssa}
+        # Used to override dimension_ssa_map for gather results where the leading
+        # dim is the trip count, not the block_size.
+        self.gather_dim_overrides: dict[str, dict[int, str]] = {}
 
     def _resolve_block_extent(self, info: Any) -> int | None:
         """Resolve concrete extent for one block if possible."""
