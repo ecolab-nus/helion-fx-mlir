@@ -150,6 +150,28 @@ class IRVisitor:
 
         return (None, False)
 
+    def _propagate_metadata(self, src_name: str, dst_name: str, ssa_override: str | None = None, is_placeholder: bool = False):
+        """Propagate metadata (values, types, and overrides) from one node to another.
+        
+        This is used when mapping outer-scope variables to inner-scope placeholders
+        in conditional blocks or loop bodies, and for passthrough operators.
+        """
+        if ssa_override:
+            ssa = ssa_override
+        else:
+            ssa = self.ctx.node_values.get(src_name, f"%{src_name}")
+
+        if is_placeholder:
+            self.loop_iter_args[dst_name] = ssa
+        
+        self.ctx.node_values[dst_name] = ssa
+        
+        if src_name in self.ctx.node_types:
+            self.ctx.node_types[dst_name] = self.ctx.node_types[src_name]
+            
+        if src_name in self.ctx.gather_dim_overrides:
+            self.ctx.gather_dim_overrides[dst_name] = self.ctx.gather_dim_overrides[src_name]
+
     @staticmethod
     def _split_top_level_commas(text: str) -> list[str]:
         """Split a type payload on commas that are not nested inside delimiters."""
@@ -1101,15 +1123,10 @@ class IRVisitor:
             placeholder_name = f"arg{i}_1"
             if isinstance(a, fx.Node) and a.name in iter_arg_names:
                 iter_name = iter_args_info[iter_arg_idx][0]
-                self.loop_iter_args[placeholder_name] = f"%{iter_name}"
-                if a.name in self.ctx.node_types:
-                    self.ctx.node_types[placeholder_name] = self.ctx.node_types[a.name]
+                self._propagate_metadata(a.name, placeholder_name, ssa_override=f"%{iter_name}", is_placeholder=True)
                 iter_arg_idx += 1
             elif isinstance(a, fx.Node):
-                ssa = self.ctx.node_values.get(a.name, f"%{a.name}")
-                self.loop_iter_args[placeholder_name] = ssa
-                if a.name in self.ctx.node_types:
-                    self.ctx.node_types[placeholder_name] = self.ctx.node_types[a.name]
+                self._propagate_metadata(a.name, placeholder_name, is_placeholder=True)
 
         self.loop_depth += 1
 
@@ -1227,13 +1244,11 @@ class IRVisitor:
         """Pass through _new_var nodes (just forward the input value)."""
         arg = node.args[0]
         if isinstance(arg, fx.Node):
-            ssa = self.ctx.node_values.get(arg.name, f"%{arg.name}")
-        else:
-            ssa = str(arg)
+            self._propagate_metadata(arg.name, node.name)
+            return self.ctx.node_values[node.name]
         
+        ssa = str(arg)
         self.ctx.node_values[node.name] = ssa
-        if isinstance(arg, fx.Node):
-            self.ctx.node_types[node.name] = self._get_tensor_type(arg)
         return ssa
     
     def visit_host_tensor(self, node: fx.Node) -> str:
@@ -2238,10 +2253,7 @@ class IRVisitor:
         for i, a in enumerate(args):
             placeholder_name = f"arg{i}_1"
             if isinstance(a, fx.Node):
-                ssa = self.ctx.node_values.get(a.name, f"%{a.name}")
-                self.loop_iter_args[placeholder_name] = ssa
-                if a.name in self.ctx.node_types:
-                    self.ctx.node_types[placeholder_name] = self.ctx.node_types[a.name]
+                self._propagate_metadata(a.name, placeholder_name, is_placeholder=True)
 
         # Visit inner graph
         self.visit_graph(if_graph)
@@ -2269,14 +2281,12 @@ class IRVisitor:
         
         # Just pass through the input tensor
         if isinstance(tensor_node, fx.Node):
-            ssa = self.ctx.node_values.get(tensor_node.name, f"%{tensor_node.name}")
-            # Propagate gather_dim_overrides
-            if tensor_node.name in self.ctx.gather_dim_overrides:
-                self.ctx.gather_dim_overrides[node.name] = self.ctx.gather_dim_overrides[tensor_node.name]
+            self._propagate_metadata(tensor_node.name, node.name)
+            ssa = self.ctx.node_values[node.name]
         else:
             ssa = str(tensor_node)
+            self.ctx.node_values[node.name] = ssa
         
-        self.ctx.node_values[node.name] = ssa
         return ssa
     
     def visit_subscript(self, node: fx.Node) -> str:
@@ -2601,7 +2611,6 @@ class IRVisitor:
                         if isinstance(block_info.size, int):
                             dim_ssas.append(str(block_info.size))
                         else:
-                            # Check gather_dim_overrides first
                             overrides = self.ctx.gather_dim_overrides.get(operand_node.name)
                             if overrides and dim_idx in overrides:
                                 dim_ssas.append(overrides[dim_idx])
@@ -2736,9 +2745,10 @@ class IRVisitor:
 
         if isinstance(val, torch.Tensor):
             resolved_shape: list[object] = []
+            overrides = self.ctx.gather_dim_overrides.get(node.name)
             for dim_idx, dim_size in enumerate(val.shape):
                 if hasattr(dim_size, "_sympy_"):
-                    dim_value, is_static = self.resolve_dimension(dim_size, dim_idx)
+                    dim_value, is_static = self.resolve_dimension(dim_size, dim_idx, overrides=overrides)
                     if dim_value is not None and is_static:
                         resolved_shape.append(int(dim_value))
                     else:

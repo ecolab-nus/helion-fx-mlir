@@ -38,13 +38,16 @@ def gather(tile: object, src: torch.Tensor) -> torch.Tensor:
 
 @_decorators.register_fake(gather)
 def _(tile: torch.SymInt, src: torch.Tensor) -> torch.Tensor:
-    # Use `tile` (the block_size SymInt) as a stand-in for the leading
-    # dimension.  The real leading dim is ceil(extent / block_size), but for
-    # type-propagation purposes we only need a *dynamic* block-size symbol so
-    # that:
-    #   (a) Helion's add_kernel_tensor_size doesn't raise ShapeSpecializingAllocation
-    #       (it only accepts concrete ints or registered block-size SymInts), and
-    #   (b) The FakeTensor carries a dynamic first dim → downstream consumers
-    #       (e.g. linalg.generic for torch.sum) emit tensor<?x...> types that
-    #       match the tensor<?x...> that loom.gather actually returns.
+    # NOTE: The `tile` (block_size SymInt) is used as a stand-in for the leading
+    # dimension (the trip count N = ceil(extent / block_size)) during FX tracing.
+    #
+    # While logically incorrect (the result rank is correct but the leading dim 
+    # size is off), this ensures that:
+    #   (a) The FakeTensor carries a dynamic first dim.
+    #   (b) Downstream ATen consumers (e.g. operators mapping to linalg.generic)
+    #       correctly infer rank-3 / rank-4 output types.
+    #
+    # The Helion MLIR Frontend's IRVisitor.visit_gather() and visit_aten_compute()
+    # are responsible for overriding this dimension with the actual trip-count SSA
+    # value during lowering to ensure MLIR rank and shape consistency.
     return src.new_empty((tile, *src.shape))
