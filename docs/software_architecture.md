@@ -4,6 +4,13 @@ This document describes the software architecture of the `helion_mlir` package, 
 
 ## Overview
 
+The lowering flow now has an explicit staged pipeline:
+
+1. `build_kernel_analysis()` discovers immutable graph/block/type facts.
+2. `LoweringSession` carries mutable lowering state.
+3. `ModuleEmitter` emits module/function scaffolding and precomputed symbols.
+4. `IRVisitor` lowers FX nodes using a registry backed by domain handler modules.
+
 The `helion_mlir` package uses a **visitor pattern** to walk Device IR FX graphs node-by-node. It generates:
 1. **Standard MLIR dialects** (`tensor`, `affine`, `linalg`, `arith`) for Helion-specific operations
 2. **Linalg dialect** (`linalg.generic`, `linalg.fill`, etc.) via **torch-mlir** for ATen operations

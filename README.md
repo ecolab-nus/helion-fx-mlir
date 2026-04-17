@@ -86,6 +86,7 @@ src/helion_mlir/
 ```
 
 For detailed architecture, FX graph structure, and lowering internals, see [Software Architecture](docs/software_architecture.md).
+For maintainer-facing ownership boundaries in the refactored lowering pipeline, see [Lowering Pipeline And Ownership](docs/lowering_pipeline_and_ownership.md).
 For expression-based block-loop bound lowering details (including `mamba_chunk_scan`), see [Block Loop Bounds Lowering README](docs/block_loop_bounds_lowering_readme.md).
 
 
@@ -139,6 +140,15 @@ This project requires **Python 3.11**.
 
 - **Masking**: `_mask_to` passes through tensors without boundary checks
 - **Dynamic Shapes**: Full dynamic shape support is work-in-progress
+
+## Internal Architecture
+
+The lowering flow is now structured around four explicit internal stages:
+
+1. `build_kernel_analysis()` gathers immutable facts from `bound_kernel`.
+2. `LoweringSession` owns mutable lowering state.
+3. `ModuleEmitter` emits module/function scaffolding and precomputed symbols.
+4. `IRVisitor` walks FX graphs using domain-grouped handler registration under `src/helion_mlir/handlers/`.
 
 ## License
 

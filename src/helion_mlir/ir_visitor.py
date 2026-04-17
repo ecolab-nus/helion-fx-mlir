@@ -32,6 +32,14 @@ import helion.language.creation_ops as hl_creation_ops
 import helion.language.view_ops as hl_view_ops
 import helion.language.tile_ops as hl_tile_ops
 
+from .handlers import (
+    register_compute_handlers,
+    register_control_flow_handlers,
+    register_memory_handlers,
+    register_symbol_handlers,
+    register_tensor_handlers,
+    register_tile_handlers,
+)
 _custome_ops_cache: dict | None = None
 
 
@@ -104,6 +112,14 @@ class IRVisitor:
         self.range_index_block_ids: dict[str, int] = {}
         # Active scf.for bounds keyed by canonical block_id.
         self.loop_bounds: dict[int, tuple[str, str]] = {}
+        self._direct_handlers: dict[object, str] = {}
+        self._predicate_handlers: list[tuple[object, str]] = []
+        register_symbol_handlers(self._direct_handlers, self._predicate_handlers)
+        register_tile_handlers(self._direct_handlers, self._predicate_handlers)
+        register_control_flow_handlers(self._direct_handlers, self._predicate_handlers)
+        register_memory_handlers(self._direct_handlers, self._predicate_handlers)
+        register_tensor_handlers(self._direct_handlers, self._predicate_handlers)
+        register_compute_handlers(self._direct_handlers, self._predicate_handlers)
     
     def resolve_dimension(self, dim_size, dim_hint: int = 0, overrides: dict[int, str] | None = None) -> tuple[str, bool]:
         """Resolve a dimension size to an SSA value or inline literal.
@@ -116,39 +132,11 @@ class IRVisitor:
             dim_hint: The dimension index (used for overrides)
             overrides: Optional mapping of dim_index -> SSA string
         """
-        from helion._compiler.variable_origin import BlockSizeOrigin
-
-        # Check overrides first if dimension index is provided
-        if overrides and dim_hint in overrides:
-             return (overrides[dim_hint], False)
-
-        if not hasattr(dim_size, '_sympy_'):
-            return (str(int(dim_size)), True)
-
-        sym = dim_size._sympy_()
-        host_function = self.ctx.bound_kernel.host_function
-        shape_env = self.ctx.bound_kernel.env.shape_env
-
-        origin_info = host_function.expr_to_origin.get(sym)
-        origin = origin_info.origin if origin_info else None
-
-        if isinstance(origin, BlockSizeOrigin):
-            raw_id = origin.block_id
-            canonical_id = self.ctx.resolve_block_id(raw_id)
-            block_info = self.ctx.env.block_sizes[raw_id]
-
-            if isinstance(block_info.size, int):
-                return (str(block_info.size), True)
-
-            ssa = self.ctx.block_size_ssa.get(canonical_id)
-            if ssa:
-                return (ssa, False)
-
-        if sym in shape_env.var_to_val:
-            concrete_val = int(shape_env.var_to_val[sym])
-            return (str(concrete_val), True)
-
-        return (None, False)
+        return self.ctx.symbol_resolver.resolve_dimension(
+            dim_size,
+            dim_hint,
+            overrides=overrides,
+        )
 
     def _propagate_metadata(self, src_name: str, dst_name: str, ssa_override: str | None = None, is_placeholder: bool = False):
         """Propagate metadata (values, types, and overrides) from one node to another.
@@ -163,9 +151,9 @@ class IRVisitor:
 
         if is_placeholder:
             self.loop_iter_args[dst_name] = ssa
-        
-        self.ctx.node_values[dst_name] = ssa
-        
+
+        self.ctx.bind_node_value(dst_name, ssa)
+
         if src_name in self.ctx.node_types:
             self.ctx.node_types[dst_name] = self.ctx.node_types[src_name]
             
@@ -209,21 +197,10 @@ class IRVisitor:
     @classmethod
     def _parse_plain_memref_dimensions(cls, memref_type: str, op_name: str) -> list[str]:
         """Extract dimensions from a memref type supported by current subview lowering."""
-        if not (memref_type.startswith("memref<") and memref_type.endswith(">")):
-            raise RuntimeError(f"{op_name} expects a memref type, got {memref_type}")
+        from .resolvers import TypeResolver
 
-        content = memref_type[memref_type.find("<") + 1 : memref_type.rfind(">")]
-        top_level_parts = cls._split_top_level_commas(content)
-        if len(top_level_parts) != 1:
-            raise RuntimeError(
-                f"{op_name} only supports implicit identity-layout memrefs without "
-                f"extra layout annotations, got {memref_type}"
-            )
-
-        shape_and_dtype = top_level_parts[0]
-        if "x" not in shape_and_dtype:
-            return []
-        return shape_and_dtype.split("x")[:-1]
+        dummy_resolver = TypeResolver.__new__(TypeResolver)
+        return TypeResolver.parse_plain_memref_dimensions(dummy_resolver, memref_type, op_name)
 
     @staticmethod
     def _validate_full_unit_slice(idx: slice, op_name: str, dim: int) -> None:
@@ -262,13 +239,13 @@ class IRVisitor:
         # Check if this is a loop iter_arg
         if node.name in self.loop_iter_args:
             ssa = self.loop_iter_args[node.name]
-            self.ctx.node_values[node.name] = ssa
+            self.ctx.bind_node_value(node.name, ssa)
             return ssa
         
         # Otherwise it's a function argument placeholder
         # For now, just create a placeholder SSA value
         ssa = f"%{node.name}"
-        self.ctx.node_values[node.name] = ssa
+        self.ctx.bind_node_value(node.name, ssa)
         
         # Register type from arg_mlir_types if available
         if node.name in self.ctx.arg_mlir_types:
@@ -279,98 +256,27 @@ class IRVisitor:
     def visit_call_function(self, node: fx.Node) -> str | None:
         """Dispatch call_function nodes to specific handlers."""
         target = node.target
-        
-        # _get_symnode -> loom.get_symbol
-        if target is hl_tracing_ops._get_symnode:
-            return self.visit_get_symnode(node)
-        
-        # full -> tensor.empty + linalg.fill
-        if target is hl_creation_ops.full:
-            return self.visit_full(node)
-        
-        # _for_loop -> scf.for + recursive visit
-        if target is hl_tracing_ops._for_loop:
-            return self.visit_for_loop(node)
 
-        # hl.dot -> linalg.matmul
-        if hasattr(target, "__name__") and target.__name__ == "dot":
-            return self.visit_dot(node)
+        method_name = self._direct_handlers.get(target)
+        if method_name is not None:
+            return getattr(self, method_name)(node)
 
-        # Python builtin/operator symbolic arithmetic on index values
         if self._is_python_index_arith_target(target):
             return self.visit_python_index_arith(node)
-        
-        # _phi -> helion.phi
-        if target is hl_tracing_ops._phi:
-            return self.visit_phi(node)
-        
-        # _new_var -> pass through
-        if target is hl_tracing_ops._new_var:
-            return self.visit_new_var(node)
-        
-        # _host_tensor -> function argument mapping
-        if target is hl_tracing_ops._host_tensor:
-            return self.visit_host_tensor(node)
-        
-        # aten.sym_size.int -> inline concrete value
-        if target is aten.sym_size.int:
-            return self.visit_sym_size(node)
-        
-        # load -> tensor.extract_slice
-        if target is hl_memory_ops.load:
-            return self.visit_load(node)
-        
-        # store -> tensor.insert_slice
-        if target is hl_memory_ops.store:
-            return self.visit_store(node)
 
-        # atomic_add -> memref.subview + loom.sum
-        if target is hl_atomic_ops.atomic_add:
-            return self.visit_atomic_add(node)
-
-        # gather (custom op) -> loom.gather placeholder
         _custom = _get_custome_ops()
         if target is _custom.get("gather"):
             return self.visit_gather(node)
-        
-        # tile_id / tile_begin / tile_end -> IV-based SSA
-        if target is hl_tile_ops.tile_index:
-            return self.visit_tile_index(node)
-        if target is hl_tile_ops.tile_id:
-            return self.visit_tile_id(node)
-        if target is hl_tile_ops.tile_begin:
-            return self.visit_tile_begin(node)
-        if target is hl_tile_ops.tile_end:
-            return self.visit_tile_end(node)
 
-        # Special indexing pattern: aten.add(tile_index(...), base_index)
         if target is aten.add.Tensor:
             maybe_index_base = self.visit_tile_index_add(node)
             if maybe_index_base is not None:
                 return maybe_index_base
 
-        # _mask_to -> shortcircuit (pass through input, boundary check placeholder)
-        if target is hl_tracing_ops._mask_to:
-            return self.visit_mask_to(node)
-        
-        # subscript -> tensor.extract_slice / tensor.expand_shape
-        if target is hl_view_ops.subscript:
-            return self.visit_subscript(node)
-        
-        # getitem -> map to loop result
         if target is getattr(__builtins__, 'getitem', None) or \
            (hasattr(target, '__name__') and target.__name__ == 'getitem'):
             return self.visit_getitem(node)
-        
-        # Check for operator.getitem
-        if target is operator.getitem:
-            return self.visit_getitem(node)
-        
-        # _if -> scf.if + recursive visit
-        if target is hl_tracing_ops._if:
-            return self.visit_if(node)
 
-        # Comparison operators -> arith.cmpi
         import operator as _operator
         _COMPARISON_OPS = {
             _operator.eq: "eq",
@@ -383,17 +289,10 @@ class IRVisitor:
         if target in _COMPARISON_OPS:
             return self.visit_comparison(node, _COMPARISON_OPS[target])
 
-        # aten.full.default -> tensor.empty + linalg.fill
-        if target is aten.full.default:
-            return self.visit_aten_full(node)
+        for predicate, handler_name in self._predicate_handlers:
+            if predicate(target):
+                return getattr(self, handler_name)(node)
 
-        # aten.* / prims.* compute operations - emit via torch-mlir
-        if hasattr(target, '__module__') and (
-            'aten' in str(target) or 'prims.' in str(target)
-        ):
-            return self.visit_aten_compute(node)
-
-        # Unsupported target
         raise RuntimeError(f"Unsupported target: {target}")
 
     
@@ -431,7 +330,7 @@ class IRVisitor:
         """Handle get_attr nodes."""
         # Just create a placeholder SSA
         ssa = self.mlir_output_helper.fresh(node.name)
-        self.ctx.node_values[node.name] = ssa
+        self.ctx.bind_node_value(node.name, ssa)
         return ssa
     
     # -------------------------------------------------------------------------
@@ -445,59 +344,18 @@ class IRVisitor:
         from different grids that tile the same source dimension share the
         same IV / block-size SSA.
         """
-        import re
-        from helion._compiler.variable_origin import BlockSizeOrigin
-
-        if node.name in self.range_index_block_ids:
-            return self.range_index_block_ids[node.name]
-
-        if node.target is hl_tile_ops.tile_index and node.args and isinstance(node.args[0], fx.Node):
-            return self._try_get_block_id_from_node(node.args[0])
-
-        raw_id: int | None = None
-
-        sym_val = node.meta.get("val")
-        if sym_val is not None and hasattr(sym_val, '_sympy_'):
-            sym = sym_val._sympy_()
-            host_function = self.ctx.bound_kernel.host_function
-            origin_info = host_function.expr_to_origin.get(sym)
-            if origin_info and isinstance(origin_info.origin, BlockSizeOrigin):
-                raw_id = origin_info.origin.block_id
-
-        if raw_id is None:
-            match = re.search(r'block_size_(\d+)', node.name)
-            if match:
-                raw_id = int(match.group(1))
-
-        if raw_id is not None:
-            return self.ctx.resolve_block_id(raw_id)
-        return None
+        return self.ctx.symbol_resolver.try_get_block_id_from_node(
+            node,
+            self.range_index_block_ids,
+        )
 
     def _get_block_size_value(self, canonical_block_id: int) -> tuple[str, bool]:
         """Return block-size value as (value, is_static_literal)."""
-        info = self.ctx.env.block_sizes[canonical_block_id]
-        if isinstance(info.size, int):
-            return (str(int(info.size)), True)
-        ssa = self.ctx.block_size_ssa.get(canonical_block_id)
-        if ssa is not None:
-            return (ssa, False)
-        fallback = self.ctx.get_loop_extent(canonical_block_id)
-        if fallback is not None:
-            return (str(fallback), True)
-        return ("1", True)
+        return self.ctx.symbol_resolver.get_block_size_value(canonical_block_id)
 
     def _is_singleton_block(self, canonical_block_id: int) -> bool:
         """Whether block size is known to be exactly 1."""
-        info = self.ctx.env.block_sizes[canonical_block_id]
-        size = info.size
-        if isinstance(size, int):
-            return size == 1
-        if hasattr(size, "_sympy_"):
-            sym = size._sympy_()
-            shape_env = self.ctx.bound_kernel.env.shape_env
-            if sym in shape_env.var_to_val:
-                return int(shape_env.var_to_val[sym]) == 1
-        return False
+        return self.ctx.symbol_resolver.is_singleton_block(canonical_block_id)
 
     def _extract_tile_index_add(self, node: fx.Node) -> tuple[int, Any] | None:
         """Detect aten.add(tile_index(...), base) pattern used for contiguous ranges."""
@@ -830,10 +688,12 @@ class IRVisitor:
         return result
 
     def _get_block_loop_iv(self, canonical_block_id: int) -> str:
-        return f"%iv_block_{canonical_block_id}"
+        return self.ctx.loop_resolver.get_block_loop_iv(canonical_block_id)
 
     def _get_active_loop_bounds(self, canonical_block_id: int) -> tuple[str, str] | None:
-        return self.loop_bounds.get(canonical_block_id)
+        if canonical_block_id in self.loop_bounds:
+            return self.loop_bounds.get(canonical_block_id)
+        return self.ctx.loop_resolver.get_active_loop_bounds(canonical_block_id)
 
     def _emit_block_offset(
         self,
@@ -1139,20 +999,13 @@ class IRVisitor:
         # ForLoopGraphInfo nodes are in a separate FX graph and may reuse node
         # names from the parent graph (e.g. tile_begin, mul_1). Keep a local
         # scope so inner-body values/types do not leak back to the parent graph.
-        saved_node_values = self.ctx.node_values.copy()
-        saved_node_types = self.ctx.node_types.copy()
-        saved_loop_result_values = self.ctx.loop_result_values.copy()
-        saved_range_index_block_ids = self.range_index_block_ids.copy()
+        with self.ctx.push_graph_scope():
+            saved_range_index_block_ids = self.range_index_block_ids.copy()
+            self.visit_graph(for_graph)
+            loop_result_snapshot = self.current_loop_result
+            loop_result_values_snapshot = self.ctx.loop_result_values.copy()
+            self.range_index_block_ids = saved_range_index_block_ids
 
-        self.visit_graph(for_graph)
-
-        loop_result_snapshot = self.current_loop_result
-        loop_result_values_snapshot = self.ctx.loop_result_values.copy()
-
-        self.ctx.node_values = saved_node_values
-        self.ctx.node_types = saved_node_types
-        self.ctx.loop_result_values = saved_loop_result_values
-        self.range_index_block_ids = saved_range_index_block_ids
         self.current_loop_result = loop_result_snapshot
 
         self.current_block_id = old_block_id
@@ -1179,8 +1032,11 @@ class IRVisitor:
         self.ctx.node_values[node.name] = result
         if isinstance(self.current_loop_result, list) and len(self.current_loop_result) > 1:
             self.ctx.loop_result_values = loop_result_values_snapshot
-            self.ctx.loop_result_values[node.name] = result
-            self.ctx.loop_result_values["_count"] = len(self.current_loop_result)
+            self.ctx.record_loop_result(
+                node.name,
+                result,
+                count=len(self.current_loop_result),
+            )
 
         return result
 
@@ -2125,8 +1981,8 @@ class IRVisitor:
         # Check if this is extracting from a multi-value loop result
         if isinstance(source, fx.Node) and source.name in self.ctx.loop_result_values:
             # Multi-value loop result - use #index syntax
-            result_ssa = f"{source_ssa}#{index}"
-            self.ctx.node_values[node.name] = result_ssa
+            result_ssa = self.ctx.lookup_loop_result_projection(source.name, index) or f"{source_ssa}#{index}"
+            self.ctx.bind_node_value(node.name, result_ssa)
             
             # Also register the tensor type from FakeTensor metadata
             if 'val' in node.meta:
@@ -2136,7 +1992,7 @@ class IRVisitor:
             return result_ssa
         
         # For single-return loops, just use the result directly
-        self.ctx.node_values[node.name] = source_ssa
+        self.ctx.bind_node_value(node.name, source_ssa)
         return source_ssa
 
     
@@ -2695,7 +2551,7 @@ class IRVisitor:
         if isinstance(node, fx.Node):
             fake = node.meta.get("val")
             if fake is not None and hasattr(fake, "dtype"):
-                return torch_dtype_to_mlir_element_type(fake.dtype)
+                return self.ctx.type_resolver.get_element_type_from_node(node)
         return "f32"  # Last-resort fallback
     
     def _get_tensor_type(self, tensor_node: fx.Node | str) -> str:
@@ -2729,7 +2585,7 @@ class IRVisitor:
         # Try to compute from FakeTensor in node metadata
         if node is not None and 'val' in node.meta:
             fake_tensor = node.meta['val']
-            return self.ctx.compute_mlir_type_from_fake_tensor(fake_tensor)
+            return self.ctx.type_resolver.compute_mlir_type_from_fake_tensor(fake_tensor)
         
         raise RuntimeError(f"Cannot compute MLIR type for node {name}")
 

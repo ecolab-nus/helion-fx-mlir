@@ -7,10 +7,13 @@ Main entry points:
 - generate_mlir: Generate MLIR from a bound Helion kernel
 - validate_with_mlir_opt: Validate emitted MLIR with mlir-opt
 
-Architecture:
-- IRVisitor: Walks FX graphs instruction-by-instruction
-- MLIROutputHelper: Text emission and SSA naming
-- LoweringContext: State management during lowering
+Stable public API:
+- generate_mlir
+- validate_with_mlir_opt
+- debug printing helpers
+
+Internal implementation types are still re-exported for compatibility, but
+new code should treat them as private unless explicitly documented otherwise.
 """
 
 # Main entry points

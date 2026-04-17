@@ -1,57 +1,24 @@
 """MLIR emission from Helion Device IR.
 
-This module generates MLIR from Helion Device IR by walking FX graph nodes
-instruction-by-instruction. Each Device IR operation is mapped to a
-corresponding MLIR operation:
-
-- _get_symnode -> SSA lookup via Origin (BlockSizeOrigin -> block_size_ssa)
-- full -> tensor.empty + linalg.fill
-- _for_loop -> scf.for + recursive visit
-- _phi -> Loop result SSA (simplified merge pattern detection)
-- _host_tensor -> function argument mapping
-- aten.sym_size.int -> inline concrete value or tensor.dim
-- load -> tensor.extract_slice
-- store -> tensor.insert_slice
-
-Architecture:
-- IRVisitor: Walks FX graphs and generates MLIR via handlers
-- LoweringContext: Holds state during lowering
-- MLIROutputHelper: Handles MLIR text emission and SSA naming
+The lowering pipeline is intentionally split into explicit stages:
+- `build_kernel_analysis()` gathers immutable facts from `bound_kernel`
+- `LoweringSession` owns mutable state during lowering
+- `ModuleEmitter` owns module/function scaffolding and pre-emitted symbols
+- `IRVisitor` walks FX graphs and lowers operations into MLIR text
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+import math
 from typing import TYPE_CHECKING
 
-import math
-
-from .mlir_utils import (
-    format_tensor_type,
-    format_shape_attr,
-)
-from .lowering_context import (
-    LoweringContext,
-)
+from .analysis import build_kernel_analysis
+from .emitter import ModuleEmitter
 from .ir_visitor import IRVisitor
+from .session import LoweringSession
 
 if TYPE_CHECKING:
-    from helion._compiler.device_ir import RootGraphInfo, ForLoopGraphInfo
-
-from .debug_utils import run_dce_cleanup
-
-
-def _emit_index_ceildiv(
-    builder,
-    lhs: str,
-    rhs: str,
-    *,
-    result_hint: str = "trip_count",
-) -> str:
-    """Emit ceildiv on index values without affine.apply."""
-    result = builder.fresh(result_hint)
-    builder.emit(f"{result} = arith.ceildivui {lhs}, {rhs} : index")
-    return result
+    from helion._compiler.runtime import BoundKernel
 
 
 def generate_mlir(
@@ -60,287 +27,67 @@ def generate_mlir(
     cleanup: bool = True,
     assume_divisible_tiles: bool = False,
 ) -> str:
-    """Generate MLIR by walking Device IR instruction-by-instruction.
-
-    Supports multi-grid kernels separated by ``hl.barrier()``.  Each grid
-    group produces its own ``affine.parallel`` region.  Block IDs that tile
-    the same source dimension across grids are *aliased* so they share the
-    same ``loom.block_size_*`` symbol and IV names.
-
-    Args:
-        bound_kernel: A bound Helion kernel with fake_args set
-        cleanup: Whether to run mlir-opt canonicalize/cse passes (default: True),
-                 you should keep it to False if you want more intuitive variable
-                 names.
-
-    Returns:
-        MLIR text representation of the kernel
-    """
-    from helion._compiler.device_ir import (
-        RootGraphInfo,
-        ForLoopGraphInfo,
-        ReductionLoopGraphInfo,
-        IfGraphInfo,
+    analysis = build_kernel_analysis(
+        bound_kernel,
+        assume_divisible_tiles=assume_divisible_tiles,
     )
+    session = LoweringSession(analysis)
+    emitter = ModuleEmitter(session)
+    emitter.emit_module_prelude()
+    emitter.emit_block_size_symbols()
+    emitter.emit_reduction_trip_counts()
 
-    # ------------------------------------------------------------------
-    # 1. Create lowering context
-    # ------------------------------------------------------------------
-    ctx = LoweringContext(bound_kernel, assume_divisible_tiles=assume_divisible_tiles)
-    builder = ctx.mlir_output_helper
-    device_ir = bound_kernel.host_function.device_ir
+    visitor = IRVisitor(session)
+    root_ids = analysis.graph_inventory.root_ids
+    root_graphs = analysis.graph_inventory.root_graphs
 
-    # ------------------------------------------------------------------
-    # 2. Classify graphs (filter out rolled reductions)
-    # ------------------------------------------------------------------
-    rolled_ids = {
-        info.new_graph_id
-        for info in device_ir.rolled_reductions
-        if info.new_graph_id is not None
-    }
-
-    root_graphs: dict[int, RootGraphInfo] = {}
-    inner_graphs: dict[int, ForLoopGraphInfo] = {}
-
-    for graph_info in device_ir.graphs:
-        if graph_info.graph_id in rolled_ids:
-            continue
-        if isinstance(graph_info, RootGraphInfo):
-            root_graphs[graph_info.graph_id] = graph_info
-        elif isinstance(graph_info, (ForLoopGraphInfo, ReductionLoopGraphInfo, IfGraphInfo)):
-            inner_graphs[graph_info.graph_id] = graph_info
-
-    if not root_graphs:
-        raise ValueError("No RootGraphInfo found in device_ir.graphs")
-
-    # Map root_ids[i] → grid_block_ids[i]
-    root_ids = list(device_ir.root_ids)
-    grid_groups = ctx.all_grid_block_ids
-    alias = ctx.block_id_alias
-
-    # Keep only inner graphs reachable from the selected roots.
-    import helion.language._tracing_ops as hl_tracing_ops
-
-    graph_lookup = {**root_graphs, **inner_graphs}
-    reachable_inner_ids: set[int] = set()
-    worklist: list[int] = [rid for rid in root_ids if rid in root_graphs]
-    visited_graphs: set[int] = set()
-
-    while worklist:
-        gid = worklist.pop()
-        if gid in visited_graphs:
-            continue
-        visited_graphs.add(gid)
-        ginfo = graph_lookup.get(gid)
-        if ginfo is None:
-            continue
-
-        for node in ginfo.graph.nodes:
-            if node.op != "call_function":
-                continue
-            if node.target is hl_tracing_ops._for_loop:
-                nested_gid = node.args[0]
-            elif node.target is hl_tracing_ops._if:
-                nested_gid = node.args[1]  # _if(test, graph_id, args)
-            else:
-                continue
-            if isinstance(nested_gid, int) and nested_gid in inner_graphs:
-                if nested_gid not in reachable_inner_ids:
-                    reachable_inner_ids.add(nested_gid)
-                worklist.append(nested_gid)
-
-    inner_graphs = {gid: g for gid, g in inner_graphs.items() if gid in reachable_inner_ids}
-
-    # Collect block IDs that are actually needed by emitted graphs.
-    used_block_ids: set[int] = set()
-    for grp in grid_groups:
-        used_block_ids.update(grp)
-    for ginfo in inner_graphs.values():
-        used_block_ids.update(getattr(ginfo, "block_ids", []))
-    used_canonical_block_ids: set[int] = {
-        ctx.resolve_block_id(bid) for bid in used_block_ids
-    }
-
-    # ------------------------------------------------------------------
-    # 3. Module header (block-size attributes)
-    # ------------------------------------------------------------------
-    module_attrs = ctx.get_module_attributes(used_canonical_ids=used_canonical_block_ids)
-    if module_attrs:
-        attr_strs = []
-        for name, (value, typ) in module_attrs.items():
-            if typ:
-                attr_strs.append(f"{name} = {value} : {typ}")
-            else:
-                attr_strs.append(f"{name} = {value}")
-        builder.emit(f"module attributes {{{', '.join(attr_strs)}}} {{")
-    else:
-        builder.emit("module {")
-    builder.push()
-
-    # ------------------------------------------------------------------
-    # 4. Function signature
-    # ------------------------------------------------------------------
-    func_args = []
-    for tensor_name, tensor_type in ctx.host_tensor_types.items():
-        ssa_name = f"%{tensor_name}"
-        func_args.append((ssa_name, tensor_type))
-        ctx.host_tensors[tensor_name] = ssa_name
-
-    args_str = ", ".join(f"{n}: {t}" for n, t in func_args)
-    builder.emit(f"func.func @{ctx.kernel_name}({args_str}) {{")
-    builder.push()
-
-    # ------------------------------------------------------------------
-    # 5. Emit block-size SSA values (canonical only)
-    # ------------------------------------------------------------------
-    block_size_ssa: dict[int, str] = {}
-    emitted_canonical: set[int] = set()
-
-    for info in ctx.env.block_sizes:
-        canonical_id = alias.get(info.block_id, info.block_id)
-        if canonical_id not in used_canonical_block_ids:
-            continue
-        if canonical_id in emitted_canonical:
-            block_size_ssa[info.block_id] = block_size_ssa[canonical_id]
-            continue
-        emitted_canonical.add(canonical_id)
-
-        sym_name = next(iter(info.debug_names), f"block_{canonical_id}")
-        ssa = f"%{sym_name}"
-
-        if isinstance(info.size, int):
-            builder.emit(f"{ssa} = arith.constant {info.size} : index")
-        else:
-            upper_bound = ctx.get_loop_extent(info.block_id)
-            is_reduction = str(info.reduction).lower()
-            builder.emit(
-                f'{ssa} = "loom.sym"() {{'
-                f'symbol_ref = @{sym_name}, '
-                f'upper_bound = {upper_bound} : index, '
-                f'is_reduction = {is_reduction}'
-                f'}} : () -> index'
-            )
-        block_size_ssa[canonical_id] = ssa
-        block_size_ssa[info.block_id] = ssa
-
-    ctx.block_size_ssa = block_size_ssa
-
-    # ------------------------------------------------------------------
-    # 6. Register all inner (for-loop / reduction-loop) graphs
-    # ------------------------------------------------------------------
-    visitor = IRVisitor(ctx)
-    for gid, ginfo in inner_graphs.items():
-        ctx.graphs[gid] = ginfo
-
-    # ------------------------------------------------------------------
-    # 7. Pre-compute reduction trip counts
-    # ------------------------------------------------------------------
-    all_parallel_block_ids: set[int] = set()
-    for grp in grid_groups:
-        all_parallel_block_ids.update(grp)
-
-    reduction_block_ids: list[int] = []
-    for ginfo in inner_graphs.values():
-        for bid in getattr(ginfo, "block_ids", []):
-            if bid in all_parallel_block_ids or bid in reduction_block_ids:
-                continue
-            reduction_block_ids.append(bid)
-
-    for_trip_counts: dict[int, str] = {}
-    for block_id in reduction_block_ids:
-        canonical_id = ctx.resolve_block_id(block_id)
-        info = ctx.env.block_sizes[block_id]
-        total_extent = ctx.get_loop_extent(block_id)
-
-        if isinstance(info.size, int):
-            trip_count_ssa = builder.fresh("trip_count")
-            trip_count = max(1, math.ceil(total_extent / info.size))
-            builder.emit(f'{trip_count_ssa} = arith.constant {trip_count} : index')
-        else:
-            tile_size_ssa = block_size_ssa[canonical_id]
-            total_extent_ssa = builder.fresh("loop_extent")
-            builder.emit(f"{total_extent_ssa} = arith.constant {total_extent} : index")
-            trip_count_ssa = _emit_index_ceildiv(
-                builder,
-                total_extent_ssa,
-                tile_size_ssa,
-            )
-        for_trip_counts[block_id] = trip_count_ssa
-
-    ctx.reduction_trip_counts = for_trip_counts
-
-    # ------------------------------------------------------------------
-    # 8. Emit one affine.parallel per grid group
-    # ------------------------------------------------------------------
-    for grid_idx, grid_block_ids in enumerate(grid_groups):
+    for grid_idx, grid_block_ids in enumerate(session.all_grid_block_ids):
         root_gid = root_ids[grid_idx]
         root_graph = root_graphs.get(root_gid)
         if root_graph is None:
-            raise ValueError(
-                f"Root graph {root_gid} for grid group {grid_idx} not found"
-            )
+            raise ValueError(f"Root graph {root_gid} for grid group {grid_idx} not found")
 
-        # Compute trip counts for this grid's parallel dimensions
         ub_ssas: list[str] = []
         iv_names: list[str] = []
-
         for block_id in grid_block_ids:
-            canonical_id = ctx.resolve_block_id(block_id)
-            info = ctx.env.block_sizes[block_id]
-            total_extent = ctx.get_loop_extent(block_id)
-
+            canonical_id = session.resolve_block_id(block_id)
+            info = session.env.block_sizes[block_id]
+            total_extent = session.get_loop_extent(block_id)
+            if total_extent is None:
+                raise ValueError(f"Missing loop extent for block_id={block_id}")
             if isinstance(info.size, int):
                 val = math.ceil(total_extent / info.size)
-                ssa = builder.fresh("trip_count")
-                builder.emit(f'{ssa} = arith.constant {val} : index')
+                ssa = session.mlir_output_helper.fresh("trip_count")
+                session.mlir_output_helper.emit(f"{ssa} = arith.constant {val} : index")
                 ub_ssas.append(ssa)
             else:
-                size_ssa = block_size_ssa[canonical_id]
-                total_extent_ssa = builder.fresh("loop_extent")
-                builder.emit(f"{total_extent_ssa} = arith.constant {total_extent} : index")
-                trip_ssa = _emit_index_ceildiv(
-                    builder,
-                    total_extent_ssa,
-                    size_ssa,
+                size_ssa = session.block_size_ssa[canonical_id]
+                total_extent_ssa = session.mlir_output_helper.fresh("loop_extent")
+                session.mlir_output_helper.emit(
+                    f"{total_extent_ssa} = arith.constant {total_extent} : index"
+                )
+                trip_ssa = session.mlir_output_helper.fresh("trip_count")
+                session.mlir_output_helper.emit(
+                    f"{trip_ssa} = arith.ceildivui {total_extent_ssa}, {size_ssa} : index"
                 )
                 ub_ssas.append(trip_ssa)
-
             iv_names.append(f"%iv_block_{canonical_id}")
 
         lb_str = "(" + ", ".join(["0"] * len(iv_names)) + ")"
         ub_str = "(" + ", ".join(ub_ssas) + ")"
         iv_str = ", ".join(iv_names)
+        session.mlir_output_helper.emit(f"affine.parallel ({iv_str}) = {lb_str} to {ub_str} {{")
+        session.mlir_output_helper.push()
 
-        builder.emit(f"affine.parallel ({iv_str}) = {lb_str} to {ub_str} {{")
-        builder.push()
-
-        # Reset per-graph mutable state so graphs don't bleed into each other
-        ctx.node_values = {}
-        ctx.node_types = {}
-        ctx.initial_acc_ssa = {}
-        ctx.loop_result_values = {}
+        session.node_values = {}
+        session.node_types = {}
+        session.initial_acc_ssa = {}
+        session.loop_result_values = {}
 
         visitor.visit_graph(root_graph)
 
-        builder.emit("affine.yield")
-        builder.pop()
-        builder.emit("}")
+        session.mlir_output_helper.emit("affine.yield")
+        session.mlir_output_helper.pop()
+        session.mlir_output_helper.emit("}")
 
-    # ------------------------------------------------------------------
-    # 9. Close function / module
-    # ------------------------------------------------------------------
-    builder.emit("return")
-    builder.pop()
-    builder.emit("}")
-    builder.pop()
-    builder.emit("}")
-
-    mlir_text = builder.build()
-
-    if cleanup:
-        try:
-            mlir_text = run_dce_cleanup(mlir_text)
-        except (FileNotFoundError, RuntimeError):
-            pass
-
-    return mlir_text
+    return emitter.close_module(cleanup=cleanup)

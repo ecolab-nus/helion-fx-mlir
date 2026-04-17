@@ -1,8 +1,8 @@
-"""Torch-MLIR integration helper using FxImporter infrastructure.
+"""Compatibility facade for the internal torch-mlir adapter.
 
-This module provides utilities to convert ATen operations from Helion Device IR
-into MLIR using torch-mlir's FxImporter. It supports generating either:
-- Linalg-on-tensors MLIR (via automatic lowering)
+New internal code should prefer importing from `helion_mlir.torch_mlir.*`.
+This module remains in place to avoid breaking existing callers while the
+adapter surface is being migrated behind narrower modules.
 
 Key Functions:
 - import_aten_node: Import a single FX node using torch-mlir
