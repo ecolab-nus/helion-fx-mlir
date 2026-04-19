@@ -37,7 +37,7 @@ def attention(
     out = torch.empty_like(q_view)
     sm_scale = 1.0 / math.sqrt(head_dim)
     for tile_b, tile_m in hl.tile([q_view.size(0), m_dim]):
-        qk_scale_dev = hl.full([], sm_scale * 1.44269504, dtype=torch.float16)
+        qk_scale_dev = hl.full([], sm_scale, dtype=torch.float16)
         m_i = hl.full([tile_b, tile_m], float("-inf"), dtype=torch.float16)
         l_i = torch.full_like(m_i, 1.0)
         acc = hl.zeros([tile_b, tile_m, head_dim], dtype=torch.float16)
@@ -47,16 +47,16 @@ def attention(
             qk = torch.bmm(q, k)
             m_ij = torch.maximum(m_i, torch.amax(qk, -1) * qk_scale_dev)
             qk = qk * qk_scale_dev - m_ij[:, :, None]
-            p = torch.exp2(qk)
+            p = torch.exp(qk)
             l_ij = torch.sum(p, -1)
-            alpha = torch.exp2(m_i - m_ij)
+            alpha = torch.exp(m_i - m_ij)
             l_i = l_i * alpha + l_ij
             acc = acc * alpha[:, :, None]
             v = v_view[tile_b, tile_n, :]
             p = p.to(v.dtype)
             acc = torch.baddbmm(acc, p, v)
             m_i = m_ij
-        m_i += torch.log2(l_i)
+        m_i += torch.log(l_i)
         acc = acc / l_i[:, :, None]
         out[tile_b, tile_m, :] = acc.to(out.dtype)
     return out.view(q_in.size())

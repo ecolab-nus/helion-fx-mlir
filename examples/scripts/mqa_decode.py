@@ -60,7 +60,7 @@ def flash_decode(
 
     # tile_h: head index, tile_s: split segment of sequence L
     for tile_b, tile_s in hl.tile([batch, kvseq_len]):
-        qk_scale = hl.full([], sm_scale * 1.44269504, dtype=torch.float16)
+        qk_scale = hl.full([], sm_scale, dtype=torch.float16)
 
         # States are Rank 1 and 2 for maximum stability
         m_i = hl.full([tile_b, num_q_head], float("-inf"), dtype=torch.float16)
@@ -79,9 +79,9 @@ def flash_decode(
             m_ij = torch.maximum(m_i, torch.amax(qk, -1) * qk_scale)
             qk = qk * qk_scale - m_ij[:, :, None] 
             
-            p = torch.exp2(qk)
+            p = torch.exp(qk)
             l_ij = torch.sum(p, -1)
-            alpha = torch.exp2(m_i - m_ij)
+            alpha = torch.exp(m_i - m_ij)
             
             l_i = l_i * alpha + l_ij
             acc = acc * alpha[:, :, None]
@@ -90,7 +90,7 @@ def flash_decode(
             acc = torch.baddbmm(acc, p, v)
             m_i = m_ij
         
-        split_lse = torch.log2(l_i) + m_i
+        split_lse = torch.log(l_i) + m_i
 
         # Gather split_lse and acc across all tile_s
         gathered_lse = gather(tile_s, split_lse) # [N, tile_b, num_q_head]
@@ -99,7 +99,7 @@ def flash_decode(
         # (2) Inter-block softmax merge
         if tile_s.id == 0:
             max_lse = torch.amax(gathered_lse, 0)
-            weights = torch.exp2(gathered_lse - max_lse)
+            weights = torch.exp(gathered_lse - max_lse)
             lse_sum = torch.sum(weights, 0)
             norm_scale = weights / lse_sum
             weighted_acc = torch.sum(gathered_acc * norm_scale[:, :, :, None], 0)
