@@ -26,7 +26,7 @@ for path in [str(_SRC_ROOT), str(_REPO_ROOT)]:
         sys.path.insert(0, path)
 
 from helion_mlir import print_debug_info, generate_mlir, validate_with_mlir_opt
-from custome_op import gather  # registers the op with Helion's decorator API
+from custome_op import gather, broadcast # registers the op with Helion's decorator API
 
 
 # ---------------------------------------------------------------------------
@@ -78,15 +78,18 @@ def flash_decode(
             m_qk = torch.amax(qk, -1, keepdim=True)
             # m_ij: [tile_b, num_q_head, 1]
             m_ij = torch.maximum(m_i, m_qk * qk_scale)
-            qk = qk * qk_scale - m_ij # broadcast tile_n pieces along -1 axis
+            # broadcast tile_n pieces along -1 axis
+            m_ij_broadcast = broadcast(m_ij, 2, [m_ij.size(0), m_ij.size(1), tile_n])
+            qk = qk * qk_scale - m_ij_broadcast
             
             p = torch.exp(qk)
             l_ij = torch.sum(p, -1, keepdim=True)
             alpha = torch.exp(m_i - m_ij)
             
             l_i = l_i * alpha + l_ij
-            # alpha = alpha.repeat(1, 1, head_dim)
-            acc = acc * alpha # broadcast head_dim pieces along -1 axis
+            # broadcast head_dim pieces along -1 axis
+            alpha_broadcast = broadcast(alpha, 2, [alpha.size(0), alpha.size(1), head_dim])
+            acc = acc * alpha_broadcast
             
             v = v_view[tile_b, tile_n, :] # [tile_h, tile_n, head_dim]
             acc = torch.baddbmm(acc, p, v)
@@ -107,6 +110,7 @@ def flash_decode(
             # [N, tile_b, num_q_head, 1]
             norm_scale = weights / lse_sum # [N, tile_b, num_q_head, 1]
             # broadcast head_dim pieces of norm_scale along axis -1
+            norm_scale = broadcast(norm_scale, 3, [norm_scale.size(0), norm_scale.size(1), norm_scale.size(2), head_dim])
             weighted_acc = torch.sum(gathered_acc * norm_scale, 0)
             out[tile_b, :, :] = weighted_acc
 
