@@ -4,88 +4,87 @@ opcode         name               target                                     arg
 -------------  -----------------  -----------------------------------------  ------------------------------------------------------------------------------------  --------
 placeholder    arg0_1             arg0_1                                     ()                                                                                    {}
 placeholder    arg1_1             arg1_1                                     ()                                                                                    {}
-call_function  _new_var           <function _new_var at 0x7f71b06916c0>      (arg0_1,)                                                                             {}
-call_function  _new_var_1         <function _new_var at 0x7f71b06916c0>      (arg1_1,)                                                                             {}
-call_function  block_size_4       <function _get_symnode at 0x7f71b065f130>  ('block_size_4',)                                                                     {}
-call_function  tile_begin         <function tile_begin at 0x7f7197bb7490>    (block_size_4,)                                                                       {}
-call_function  block_size_5       <function _get_symnode at 0x7f71b065f130>  ('block_size_5',)                                                                     {}
-call_function  tile_begin_1       <function tile_begin at 0x7f7197bb7490>    (block_size_5,)                                                                       {}
-call_function  block_size_3       <function _get_symnode at 0x7f71b065f130>  ('block_size_3',)                                                                     {}
-call_function  tile_begin_2       <function tile_begin at 0x7f7197bb7490>    (block_size_3,)                                                                       {}
-call_function  x_size2            <function _get_symnode at 0x7f71b065f130>  ('x_size2',)                                                                          {}
+call_function  _new_var           <function _new_var at 0x7f9e80025750>      (arg0_1,)                                                                             {}
+call_function  _new_var_1         <function _new_var at 0x7f9e80025750>      (arg1_1,)                                                                             {}
+call_function  block_size_4       <function _get_symnode at 0x7f9e7fff31c0>  ('block_size_4',)                                                                     {}
+call_function  tile_begin         <function tile_begin at 0x7f9e715c3520>    (block_size_4,)                                                                       {}
+call_function  block_size_5       <function _get_symnode at 0x7f9e7fff31c0>  ('block_size_5',)                                                                     {}
+call_function  tile_begin_1       <function tile_begin at 0x7f9e715c3520>    (block_size_5,)                                                                       {}
+call_function  block_size_3       <function _get_symnode at 0x7f9e7fff31c0>  ('block_size_3',)                                                                     {}
+call_function  tile_begin_2       <function tile_begin at 0x7f9e715c3520>    (block_size_3,)                                                                       {}
+call_function  x_size2            <function _get_symnode at 0x7f9e7fff31c0>  ('x_size2',)                                                                          {}
 call_function  floordiv_1         <built-in function floordiv>               (tile_begin_2, x_size2)                                                               {}
-call_function  cb                 <function _host_tensor at 0x7f71b065fd90>  ('cb',)                                                                               {}
+call_function  cb                 <function _host_tensor at 0x7f9e7fff3e20>  ('cb',)                                                                               {}
 call_function  sym_size_int       aten.sym_size.int                          (arg0_1, 0)                                                                           {}
-call_function  block_size_2       <function _get_symnode at 0x7f71b065f130>  ('block_size_2',)                                                                     {}
-call_function  cb_local           <function load at 0x7f7197b9f910>          (cb, [tile_begin, tile_begin_1, floordiv_1, sym_size_int, block_size_2], None, None)  {}
-call_function  dA_cumsum          <function _host_tensor at 0x7f71b065fd90>  ('dA_cumsum',)                                                                        {}
-call_function  dA_cumsum_local_k  <function load at 0x7f7197b9f910>          (dA_cumsum, [tile_begin, tile_begin_2, tile_begin_1, block_size_2], None, None)       {}
-call_function  subscript          <function subscript at 0x7f7197bc8af0>     (_new_var, [slice(None, None, None), None])                                           {}
-call_function  subscript_1        <function subscript at 0x7f7197bc8af0>     (dA_cumsum_local_k, [None, slice(None, None, None)])                                  {}
+call_function  block_size_2       <function _get_symnode at 0x7f9e7fff31c0>  ('block_size_2',)                                                                     {}
+call_function  cb_local           <function load at 0x7f9e715ab9a0>          (cb, [tile_begin, tile_begin_1, floordiv_1, sym_size_int, block_size_2], None, None)  {}
+call_function  dA_cumsum          <function _host_tensor at 0x7f9e7fff3e20>  ('dA_cumsum',)                                                                        {}
+call_function  dA_cumsum_local_k  <function load at 0x7f9e715ab9a0>          (dA_cumsum, [tile_begin, tile_begin_2, tile_begin_1, block_size_2], None, None)       {}
+call_function  subscript          <function subscript at 0x7f9e715d4b80>     (_new_var, [slice(None, None, None), None])                                           {}
+call_function  subscript_1        <function subscript at 0x7f9e715d4b80>     (dA_cumsum_local_k, [None, slice(None, None, None)])                                  {}
 call_function  sub                aten.sub.Tensor                            (subscript, subscript_1)                                                              {}
 call_function  exp                aten.exp.default                           (sub,)                                                                                {}
 call_function  cb_local_1         aten.mul.Tensor                            (cb_local, exp)                                                                       {}
-call_function  dt                 <function _host_tensor at 0x7f71b065fd90>  ('dt',)                                                                               {}
-call_function  dt_local           <function load at 0x7f7197b9f910>          (dt, [tile_begin, tile_begin_2, tile_begin_1, block_size_2], None, None)              {}
-call_function  subscript_2        <function subscript at 0x7f7197bc8af0>     (dt_local, [None, slice(None, None, None)])                                           {}
+call_function  dt                 <function _host_tensor at 0x7f9e7fff3e20>  ('dt',)                                                                               {}
+call_function  dt_local           <function load at 0x7f9e715ab9a0>          (dt, [tile_begin, tile_begin_2, tile_begin_1, block_size_2], None, None)              {}
+call_function  subscript_2        <function subscript at 0x7f9e715d4b80>     (dt_local, [None, slice(None, None, None)])                                           {}
 call_function  cb_local_2         aten.mul.Tensor                            (cb_local_1, subscript_2)                                                             {}
-call_function  cb_size3           <function _get_symnode at 0x7f71b065f130>  ('cb_size3',)                                                                         {}
+call_function  cb_size3           <function _get_symnode at 0x7f9e7fff31c0>  ('cb_size3',)                                                                         {}
 call_function  mul_2              <built-in function mul>                    (tile_begin_1, cb_size3)                                                              {}
-call_function  tile_index         <function tile_index at 0x7f7197bb7130>    (block_size_2,)                                                                       {}
+call_function  tile_index         <function tile_index at 0x7f9e715c31c0>    (block_size_2,)                                                                       {}
 call_function  add                aten.add.Tensor                            (tile_index, mul_2)                                                                   {}
-call_function  x                  <function _host_tensor at 0x7f71b065fd90>  ('x',)                                                                                {}
+call_function  x                  <function _host_tensor at 0x7f9e7fff3e20>  ('x',)                                                                                {}
 call_function  sym_size_int_1     aten.sym_size.int                          (arg1_1, 1)                                                                           {}
-call_function  x_local            <function load at 0x7f7197b9f910>          (x, [tile_begin, add, tile_begin_2, sym_size_int_1], None, None)                      {}
-call_function  acc_o              <function dot at 0x7f71b065d510>           (cb_local_2, x_local, _new_var_1, None)                                               {}
+call_function  x_local            <function load at 0x7f9e715ab9a0>          (x, [tile_begin, add, tile_begin_2, sym_size_int_1], None, None)                      {}
+call_function  acc_o              <function dot at 0x7f9e7fff15a0>           (cb_local_2, x_local, _new_var_1, None)                                               {}
 output         output             output                                     ([acc_o],)                                                                            {}
 Graph 1: RootGraphInfo
-opcode         name               target                                     args                                                                                                        kwargs
--------------  -----------------  -----------------------------------------  ----------------------------------------------------------------------------------------------------------  --------
-call_function  block_size_0       <function _get_symnode at 0x7f71b065f130>  ('block_size_0',)                                                                                           {}
-call_function  block_size_1       <function _get_symnode at 0x7f71b065f130>  ('block_size_1',)                                                                                           {}
-call_function  acc_o              <function full at 0x7f7197b8f130>          ([block_size_0, block_size_1], 0.0, torch.float16, None)                                                    {}
-call_function  block_size_4       <function _get_symnode at 0x7f71b065f130>  ('block_size_4',)                                                                                           {}
-call_function  tile_begin         <function tile_begin at 0x7f7197bb7490>    (block_size_4,)                                                                                             {}
-call_function  block_size_3       <function _get_symnode at 0x7f71b065f130>  ('block_size_3',)                                                                                           {}
-call_function  tile_begin_1       <function tile_begin at 0x7f7197bb7490>    (block_size_3,)                                                                                             {}
-call_function  block_size_5       <function _get_symnode at 0x7f71b065f130>  ('block_size_5',)                                                                                           {}
-call_function  tile_begin_2       <function tile_begin at 0x7f7197bb7490>    (block_size_5,)                                                                                             {}
-call_function  dA_cumsum          <function _host_tensor at 0x7f71b065fd90>  ('dA_cumsum',)                                                                                              {}
-call_function  dA_cumsum_local_m  <function load at 0x7f7197b9f910>          (dA_cumsum, [tile_begin, tile_begin_1, tile_begin_2, block_size_0], None, None)                             {}
-call_function  scale_m_local      aten.exp.default                           (dA_cumsum_local_m,)                                                                                        {}
-call_function  tile_index         <function tile_index at 0x7f7197bb7130>    (block_size_0,)                                                                                             {}
-call_function  cb_size3           <function _get_symnode at 0x7f71b065f130>  ('cb_size3',)                                                                                               {}
-call_function  mul                <built-in function mul>                    (tile_begin_2, cb_size3)                                                                                    {}
-call_function  add                aten.add.Tensor                            (tile_index, mul)                                                                                           {}
-call_function  x_size2            <function _get_symnode at 0x7f71b065f130>  ('x_size2',)                                                                                                {}
-call_function  floordiv_1         <built-in function floordiv>               (tile_begin_1, x_size2)                                                                                     {}
-call_function  C                  <function _host_tensor at 0x7f71b065fd90>  ('C',)                                                                                                      {}
-call_function  C_local            <function load at 0x7f7197b9f910>          (C, [tile_begin, add, floordiv_1, slice(None, None, None)], None, None)                                     {}
-call_function  prev_states        <function _host_tensor at 0x7f71b065fd90>  ('prev_states',)                                                                                            {}
-call_function  prev_states_local  <function load at 0x7f7197b9f910>          (prev_states, [tile_begin, tile_begin_2, tile_begin_1, block_size_1, slice(None, None, None)], None, None)  {}
-call_function  permute            aten.permute.default                       (prev_states_local, [1, 0])                                                                                 {}
-call_function  acc_o_1            <function dot at 0x7f71b065d510>           (C_local, permute, acc_o, None)                                                                             {}
-call_function  subscript          <function subscript at 0x7f7197bc8af0>     (scale_m_local, [slice(None, None, None), None])                                                            {}
-call_function  acc_o_2            aten.mul.Tensor                            (acc_o_1, subscript)                                                                                        {}
-call_function  tile_id            <function tile_id at 0x7f7197bb7d90>       (block_size_0,)                                                                                             {}
-call_function  add_1              <built-in function add>                    (tile_id, 1)                                                                                                {}
-call_function  mul_2              <built-in function mul>                    (add_1, block_size_0)                                                                                       {}
-call_function  _for_loop          <function _for_loop at 0x7f71b0690160>     (0, [0], [mul_2], [dA_cumsum_local_m, acc_o_2])                                                             {}
-call_function  getitem            <built-in function getitem>                (_for_loop, 0)                                                                                              {}
-call_function  _phi               <function _phi at 0x7f71b0690670>          (acc_o_2, getitem)                                                                                          {}
-call_function  D                  <function _host_tensor at 0x7f71b065fd90>  ('D',)                                                                                                      {}
-call_function  D_local            <function load at 0x7f7197b9f910>          (D, [tile_begin_1], None, None)                                                                             {}
-call_function  tile_index_1       <function tile_index at 0x7f7197bb7130>    (block_size_0,)                                                                                             {}
-call_function  add_2              aten.add.Tensor                            (tile_index_1, mul)                                                                                         {}
-call_function  x                  <function _host_tensor at 0x7f71b065fd90>  ('x',)                                                                                                      {}
-call_function  x_residual         <function load at 0x7f7197b9f910>          (x, [tile_begin, add_2, tile_begin_1, block_size_1], None, None)                                            {}
-call_function  mul_4              aten.mul.Tensor                            (x_residual, D_local)                                                                                       {}
-call_function  acc_o_3            aten.add.Tensor                            (_phi, mul_4)                                                                                               {}
-call_function  tile_index_2       <function tile_index at 0x7f7197bb7130>    (block_size_0,)                                                                                             {}
-call_function  add_4              aten.add.Tensor                            (tile_index_2, mul)                                                                                         {}
-call_function  out                <function _host_tensor at 0x7f71b065fd90>  ('out',)                                                                                                    {}
-call_function  store              <function store at 0x7f7197b9c040>         (out, [tile_begin, add_4, tile_begin_1, block_size_1], acc_o_3, None)                                       {}
-output         output             output                                     (None,)                                                                                                     {}
+opcode         name               target                                     args                                                                                                          kwargs
+-------------  -----------------  -----------------------------------------  ------------------------------------------------------------------------------------------------------------  --------
+call_function  block_size_0       <function _get_symnode at 0x7f9e7fff31c0>  ('block_size_0',)                                                                                             {}
+call_function  block_size_1       <function _get_symnode at 0x7f9e7fff31c0>  ('block_size_1',)                                                                                             {}
+call_function  acc_o              <function full at 0x7f9e7159f1c0>          ([block_size_0, block_size_1], 0.0, torch.float16, None)                                                      {}
+call_function  block_size_4       <function _get_symnode at 0x7f9e7fff31c0>  ('block_size_4',)                                                                                             {}
+call_function  tile_begin         <function tile_begin at 0x7f9e715c3520>    (block_size_4,)                                                                                               {}
+call_function  block_size_3       <function _get_symnode at 0x7f9e7fff31c0>  ('block_size_3',)                                                                                             {}
+call_function  tile_begin_1       <function tile_begin at 0x7f9e715c3520>    (block_size_3,)                                                                                               {}
+call_function  block_size_5       <function _get_symnode at 0x7f9e7fff31c0>  ('block_size_5',)                                                                                             {}
+call_function  tile_begin_2       <function tile_begin at 0x7f9e715c3520>    (block_size_5,)                                                                                               {}
+call_function  dA_cumsum          <function _host_tensor at 0x7f9e7fff3e20>  ('dA_cumsum',)                                                                                                {}
+call_function  dA_cumsum_local_m  <function load at 0x7f9e715ab9a0>          (dA_cumsum, [tile_begin, tile_begin_1, tile_begin_2, block_size_0], None, None)                               {}
+call_function  scale_m_local      aten.exp.default                           (dA_cumsum_local_m,)                                                                                          {}
+call_function  tile_index         <function tile_index at 0x7f9e715c31c0>    (block_size_0,)                                                                                               {}
+call_function  cb_size3           <function _get_symnode at 0x7f9e7fff31c0>  ('cb_size3',)                                                                                                 {}
+call_function  mul                <built-in function mul>                    (tile_begin_2, cb_size3)                                                                                      {}
+call_function  add                aten.add.Tensor                            (tile_index, mul)                                                                                             {}
+call_function  x_size2            <function _get_symnode at 0x7f9e7fff31c0>  ('x_size2',)                                                                                                  {}
+call_function  floordiv_1         <built-in function floordiv>               (tile_begin_1, x_size2)                                                                                       {}
+call_function  C                  <function _host_tensor at 0x7f9e7fff3e20>  ('C',)                                                                                                        {}
+call_function  C_local            <function load at 0x7f9e715ab9a0>          (C, [tile_begin, add, floordiv_1, slice(None, None, None)], None, None)                                       {}
+call_function  prev_states_T      <function _host_tensor at 0x7f9e7fff3e20>  ('prev_states_T',)                                                                                            {}
+call_function  prev_states_local  <function load at 0x7f9e715ab9a0>          (prev_states_T, [tile_begin, tile_begin_2, tile_begin_1, slice(None, None, None), block_size_1], None, None)  {}
+call_function  acc_o_1            <function dot at 0x7f9e7fff15a0>           (C_local, prev_states_local, acc_o, None)                                                                     {}
+call_function  subscript          <function subscript at 0x7f9e715d4b80>     (scale_m_local, [slice(None, None, None), None])                                                              {}
+call_function  acc_o_2            aten.mul.Tensor                            (acc_o_1, subscript)                                                                                          {}
+call_function  tile_id            <function tile_id at 0x7f9e715c3e20>       (block_size_0,)                                                                                               {}
+call_function  add_1              <built-in function add>                    (tile_id, 1)                                                                                                  {}
+call_function  mul_2              <built-in function mul>                    (add_1, block_size_0)                                                                                         {}
+call_function  _for_loop          <function _for_loop at 0x7f9e800241f0>     (0, [0], [mul_2], [dA_cumsum_local_m, acc_o_2])                                                               {}
+call_function  getitem            <built-in function getitem>                (_for_loop, 0)                                                                                                {}
+call_function  _phi               <function _phi at 0x7f9e80024700>          (acc_o_2, getitem)                                                                                            {}
+call_function  D                  <function _host_tensor at 0x7f9e7fff3e20>  ('D',)                                                                                                        {}
+call_function  D_local            <function load at 0x7f9e715ab9a0>          (D, [tile_begin_1], None, None)                                                                               {}
+call_function  tile_index_1       <function tile_index at 0x7f9e715c31c0>    (block_size_0,)                                                                                               {}
+call_function  add_2              aten.add.Tensor                            (tile_index_1, mul)                                                                                           {}
+call_function  x                  <function _host_tensor at 0x7f9e7fff3e20>  ('x',)                                                                                                        {}
+call_function  x_residual         <function load at 0x7f9e715ab9a0>          (x, [tile_begin, add_2, tile_begin_1, block_size_1], None, None)                                              {}
+call_function  mul_4              aten.mul.Tensor                            (x_residual, D_local)                                                                                         {}
+call_function  acc_o_3            aten.add.Tensor                            (_phi, mul_4)                                                                                                 {}
+call_function  tile_index_2       <function tile_index at 0x7f9e715c31c0>    (block_size_0,)                                                                                               {}
+call_function  add_4              aten.add.Tensor                            (tile_index_2, mul)                                                                                           {}
+call_function  out                <function _host_tensor at 0x7f9e7fff3e20>  ('out',)                                                                                                      {}
+call_function  store              <function store at 0x7f9e715a8040>         (out, [tile_begin, add_4, tile_begin_1, block_size_1], acc_o_3, None)                                         {}
+output         output             output                                     (None,)                                                                                                       {}
 
 
 === Nodes with symbols ===
@@ -144,9 +143,8 @@ Node x_size2 : s53
 Node floordiv_1 : (u15//s53)
 Node C : FakeTensor(..., size=(s26, s16, 1, s22), dtype=torch.float16)
 Node C_local : FakeTensor(..., size=(u1, u17), dtype=torch.float16)
-Node prev_states : FakeTensor(..., size=(s92, s28, s61, s46, s22), dtype=torch.float16)
-Node prev_states_local : FakeTensor(..., size=(u2, u17), dtype=torch.float16)
-Node permute : FakeTensor(..., size=(u17, u2), dtype=torch.float16)
+Node prev_states_T : FakeTensor(..., size=(s92, s28, s61, s22, s46), dtype=torch.float16)
+Node prev_states_local : FakeTensor(..., size=(u17, u2), dtype=torch.float16)
 Node acc_o_1 : FakeTensor(..., size=(u1, u2), dtype=torch.float16)
 Node subscript : FakeTensor(..., size=(u1, 1), dtype=torch.float16)
 Node acc_o_2 : FakeTensor(..., size=(u1, u2), dtype=torch.float16)
@@ -259,15 +257,14 @@ module attributes {loom.tile_b = {is_reduction = false, upper_bound = 2 : index}
         linalg.yield %37 : f16
       } -> tensor<?xf16>
       %20 = arith.muli %15, %c256 : index
-      %21 = arith.divui %14, %c64 : index
-      %subview_0 = memref.subview %arg4[%13, %20, %21, 0] [1, %0, 1, 64] [1, 1, 1, 1] : memref<2x2048x1x64xf16> to memref<?x64xf16, strided<[64, 1], offset: ?>>
-      %22 = bufferization.to_tensor %subview_0 : memref<?x64xf16, strided<[64, 1], offset: ?>> to tensor<?x64xf16>
-      %23 = arith.muli %arg10, %1 : index
-      %subview_1 = memref.subview %arg5[%13, %15, %14, %23, 0] [1, 1, 1, %1, 64] [1, 1, 1, 1, 1] : memref<2x8x64x64x64xf16> to memref<?x64xf16, strided<[64, 1], offset: ?>>
-      %24 = bufferization.to_tensor %subview_1 : memref<?x64xf16, strided<[64, 1], offset: ?>> to tensor<?x64xf16>
-      %25 = tensor.empty(%1) : tensor<64x?xf16>
-      %transposed = linalg.transpose ins(%24 : tensor<?x64xf16>) outs(%25 : tensor<64x?xf16>) permutation = [1, 0] 
-      %26 = linalg.matmul ins(%22, %transposed : tensor<?x64xf16>, tensor<64x?xf16>) outs(%12 : tensor<?x?xf16>) -> tensor<?x?xf16>
+      %21 = arith.addi %16, %20 : index
+      %22 = arith.divui %14, %c64 : index
+      %subview_0 = memref.subview %arg4[%13, %21, %22, 0] [1, %0, 1, 64] [1, 1, 1, 1] : memref<2x2048x1x64xf16> to memref<?x64xf16, strided<[64, 1], offset: ?>>
+      %23 = bufferization.to_tensor %subview_0 : memref<?x64xf16, strided<[64, 1], offset: ?>> to tensor<?x64xf16>
+      %24 = arith.muli %arg10, %1 : index
+      %subview_1 = memref.subview %arg5[%13, %15, %14, 0, %24] [1, 1, 1, 64, %1] [1, 1, 1, 1, 1] : memref<2x8x64x64x64xf16> to memref<64x?xf16, strided<[64, 1], offset: ?>>
+      %25 = bufferization.to_tensor %subview_1 : memref<64x?xf16, strided<[64, 1], offset: ?>> to tensor<64x?xf16>
+      %26 = linalg.matmul ins(%23, %25 : tensor<?x64xf16>, tensor<64x?xf16>) outs(%12 : tensor<?x?xf16>) -> tensor<?x?xf16>
       %expanded = tensor.expand_shape %19 [[0, 1]] output_shape [%0, 1] : tensor<?xf16> into tensor<?x1xf16>
       %27 = linalg.generic {indexing_maps = [#map1, #map2, #map1], iterator_types = ["parallel", "parallel"]} ins(%26, %expanded : tensor<?x?xf16>, tensor<?x1xf16>) outs(%11 : tensor<?x?xf16>) {
       ^bb0(%in: f16, %in_5: f16, %out: f16):
@@ -279,7 +276,7 @@ module attributes {loom.tile_b = {is_reduction = false, upper_bound = 2 : index}
       %30 = arith.ceildivui %29, %2 : index
       %31 = scf.for %arg13 = %c0 to %30 step %c1 iter_args(%arg14 = %27) -> (tensor<?x?xf16>) {
         %37 = arith.muli %arg13, %2 : index
-        %subview_5 = memref.subview %arg0[%13, %15, %21, %16, %37] [1, 1, 1, %0, %2] [1, 1, 1, 1, 1] : memref<2x8x1x256x256xf16> to memref<?x?xf16, strided<[256, 1], offset: ?>>
+        %subview_5 = memref.subview %arg0[%13, %15, %22, %16, %37] [1, 1, 1, %0, %2] [1, 1, 1, 1, 1] : memref<2x8x1x256x256xf16> to memref<?x?xf16, strided<[256, 1], offset: ?>>
         %38 = bufferization.to_tensor %subview_5 : memref<?x?xf16, strided<[256, 1], offset: ?>> to tensor<?x?xf16>
         %subview_6 = memref.subview %arg1[%13, %14, %15, %37] [1, 1, 1, %2] [1, 1, 1, 1] : memref<2x64x8x256xf16> to memref<?xf16, strided<[1], offset: ?>>
         %39 = bufferization.to_tensor %subview_6 : memref<?xf16, strided<[1], offset: ?>> to tensor<?xf16>
@@ -288,35 +285,36 @@ module attributes {loom.tile_b = {is_reduction = false, upper_bound = 2 : index}
         %40 = tensor.empty(%0, %2) : tensor<?x?xf16>
         %41 = linalg.generic {indexing_maps = [#map2, #map3, #map1], iterator_types = ["parallel", "parallel"]} ins(%expanded_7, %expanded_8 : tensor<?x1xf16>, tensor<1x?xf16>) outs(%40 : tensor<?x?xf16>) {
         ^bb0(%in: f16, %in_12: f16, %out: f16):
-          %48 = arith.subf %in, %in_12 : f16
-          linalg.yield %48 : f16
+          %49 = arith.subf %in, %in_12 : f16
+          linalg.yield %49 : f16
         } -> tensor<?x?xf16>
         %42 = linalg.generic {indexing_maps = [#map1, #map1], iterator_types = ["parallel", "parallel"]} ins(%41 : tensor<?x?xf16>) outs(%40 : tensor<?x?xf16>) {
         ^bb0(%in: f16, %out: f16):
-          %48 = math.exp %in : f16
-          linalg.yield %48 : f16
+          %49 = math.exp %in : f16
+          linalg.yield %49 : f16
         } -> tensor<?x?xf16>
         %43 = linalg.generic {indexing_maps = [#map1, #map1, #map1], iterator_types = ["parallel", "parallel"]} ins(%38, %42 : tensor<?x?xf16>, tensor<?x?xf16>) outs(%40 : tensor<?x?xf16>) {
         ^bb0(%in: f16, %in_12: f16, %out: f16):
-          %48 = arith.mulf %in, %in_12 : f16
-          linalg.yield %48 : f16
+          %49 = arith.mulf %in, %in_12 : f16
+          linalg.yield %49 : f16
         } -> tensor<?x?xf16>
         %subview_9 = memref.subview %arg2[%13, %14, %15, %37] [1, 1, 1, %2] [1, 1, 1, 1] : memref<2x64x8x256xf16> to memref<?xf16, strided<[1], offset: ?>>
         %44 = bufferization.to_tensor %subview_9 : memref<?xf16, strided<[1], offset: ?>> to tensor<?xf16>
         %expanded_10 = tensor.expand_shape %44 [[0, 1]] output_shape [1, %2] : tensor<?xf16> into tensor<1x?xf16>
         %45 = linalg.generic {indexing_maps = [#map1, #map3, #map1], iterator_types = ["parallel", "parallel"]} ins(%43, %expanded_10 : tensor<?x?xf16>, tensor<1x?xf16>) outs(%40 : tensor<?x?xf16>) {
         ^bb0(%in: f16, %in_12: f16, %out: f16):
-          %48 = arith.mulf %in, %in_12 : f16
-          linalg.yield %48 : f16
+          %49 = arith.mulf %in, %in_12 : f16
+          linalg.yield %49 : f16
         } -> tensor<?x?xf16>
-        %subview_11 = memref.subview %arg3[%13, %20, %14, %23] [1, %2, 1, %1] [1, 1, 1, 1] : memref<2x2048x64x64xf16> to memref<?x?xf16, strided<[4096, 1], offset: ?>>
-        %46 = bufferization.to_tensor %subview_11 : memref<?x?xf16, strided<[4096, 1], offset: ?>> to tensor<?x?xf16>
-        %47 = linalg.matmul ins(%45, %46 : tensor<?x?xf16>, tensor<?x?xf16>) outs(%arg14 : tensor<?x?xf16>) -> tensor<?x?xf16>
-        scf.yield %47 : tensor<?x?xf16>
+        %46 = arith.addi %37, %20 : index
+        %subview_11 = memref.subview %arg3[%13, %46, %14, %24] [1, %2, 1, %1] [1, 1, 1, 1] : memref<2x2048x64x64xf16> to memref<?x?xf16, strided<[4096, 1], offset: ?>>
+        %47 = bufferization.to_tensor %subview_11 : memref<?x?xf16, strided<[4096, 1], offset: ?>> to tensor<?x?xf16>
+        %48 = linalg.matmul ins(%45, %47 : tensor<?x?xf16>, tensor<?x?xf16>) outs(%arg14 : tensor<?x?xf16>) -> tensor<?x?xf16>
+        scf.yield %48 : tensor<?x?xf16>
       }
       %subview_2 = memref.subview %arg6[%14] [1] [1] : memref<64xf16> to memref<f16, strided<[], offset: ?>>
       %32 = bufferization.to_tensor %subview_2 : memref<f16, strided<[], offset: ?>> to tensor<f16>
-      %subview_3 = memref.subview %arg3[%13, %20, %14, %23] [1, %0, 1, %1] [1, 1, 1, 1] : memref<2x2048x64x64xf16> to memref<?x?xf16, strided<[4096, 1], offset: ?>>
+      %subview_3 = memref.subview %arg3[%13, %21, %14, %24] [1, %0, 1, %1] [1, 1, 1, 1] : memref<2x2048x64x64xf16> to memref<?x?xf16, strided<[4096, 1], offset: ?>>
       %33 = bufferization.to_tensor %subview_3 : memref<?x?xf16, strided<[4096, 1], offset: ?>> to tensor<?x?xf16>
       %34 = linalg.generic {indexing_maps = [#map1, #map4, #map1], iterator_types = ["parallel", "parallel"]} ins(%33, %32 : tensor<?x?xf16>, tensor<f16>) outs(%11 : tensor<?x?xf16>) {
       ^bb0(%in: f16, %in_5: f16, %out: f16):
@@ -328,7 +326,7 @@ module attributes {loom.tile_b = {is_reduction = false, upper_bound = 2 : index}
         %37 = arith.addf %in, %in_5 : f16
         linalg.yield %37 : f16
       } -> tensor<?x?xf16>
-      %subview_4 = memref.subview %arg7[%13, %20, %14, %23] [1, %0, 1, %1] [1, 1, 1, 1] : memref<2x2048x64x64xf16> to memref<?x?xf16, strided<[4096, 1], offset: ?>>
+      %subview_4 = memref.subview %arg7[%13, %21, %14, %24] [1, %0, 1, %1] [1, 1, 1, 1] : memref<2x2048x64x64xf16> to memref<?x?xf16, strided<[4096, 1], offset: ?>>
       %36 = bufferization.to_buffer %35 : tensor<?x?xf16> to memref<?x?xf16, strided<[4096, 1], offset: ?>>
       memref.copy %36, %subview_4 : memref<?x?xf16, strided<[4096, 1], offset: ?>> to memref<?x?xf16, strided<[4096, 1], offset: ?>>
     }
