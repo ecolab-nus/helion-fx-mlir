@@ -19,14 +19,19 @@ from helion._testing import DEVICE
 from helion._testing import run_example
 import helion.language as hl
 
-# Make sure the repo-local src/ package is importable when the example is
-# executed directly.
+# ---------------------------------------------------------------------------
+# Path setup
+# ---------------------------------------------------------------------------
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_ROOT = _REPO_ROOT / "src"
-if str(_SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SRC_ROOT))
+_CUSTOME_OP_ROOT = _REPO_ROOT / "custome_op"
+
+for path in [str(_SRC_ROOT), str(_REPO_ROOT)]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 from helion_mlir import generate_mlir, validate_with_mlir_opt, print_debug_info
+from custome_op import broadcast # registers the op with Helion's decorator API
 
 
 # %%
@@ -100,8 +105,10 @@ def helion_mamba2_chunk_scan_kernel(
         acc_o = hl.zeros([tile_m, tile_n], dtype=accum_dtype)
         # dA_cumsum_local_m: [tile_m]
         dA_cumsum_local_m = dA_cumsum[tile_b.begin, tile_h.begin, tile_c.begin, tile_m]
-        # scale_m_local: [tile_m]
-        scale_m_local = torch.exp(dA_cumsum_local_m)
+        dA_cumsum_local_m_bc_n = broadcast(dA_cumsum_local_m, 1, [dA_cumsum_local_m.size(0), tile_n])
+
+        # scale_m_local: [tile_m, tile_n]
+        scale_m_local = torch.exp(dA_cumsum_local_m_bc_n)
 
         # C_local: [tile_m, dstate]
         # row index = tile_c * chunk_size + tile_m.index
@@ -117,8 +124,7 @@ def helion_mamba2_chunk_scan_kernel(
         ]
         # hl.dot([tile_m, dstate], [dstate, tile_n]) -> [tile_m, tile_n]
         acc_o = hl.dot(C_local, prev_states_local, acc=acc_o)
-        # scale_m_local[:, None]: [tile_m, 1], broadcast over tile_n axis
-        acc_o *= scale_m_local[:, None]
+        acc_o *= scale_m_local
 
         for tile_k in hl.tile((tile_m.id + 1) * block_m, block_size=block_k):
             # cb_local: [tile_m, tile_k]
@@ -133,16 +139,15 @@ def helion_mamba2_chunk_scan_kernel(
             dA_cumsum_local_k = dA_cumsum[
                 tile_b.begin, tile_h.begin, tile_c.begin, tile_k
             ]
-            # dA_cumsum_local_m[:, None]: [tile_m, 1]
-            # dA_cumsum_local_k[None, :]: [1, tile_k]
+            dA_cumsum_local_m_bc_k = broadcast(dA_cumsum_local_m, 1, [dA_cumsum_local_m.size(0), tile_k])
+            dA_cumsum_local_k = broadcast(dA_cumsum_local_k, 0, [tile_m, dA_cumsum_local_k.size(0)])
             # broadcast to [tile_m, tile_k]
-            cb_local *= torch.exp(
-                dA_cumsum_local_m[:, None] - dA_cumsum_local_k[None, :]
-            )
+            cb_local *= torch.exp(dA_cumsum_local_m_bc_k - dA_cumsum_local_k)
             # dt_local: [tile_k]
             dt_local = dt[tile_b.begin, tile_h.begin, tile_c.begin, tile_k]
             # dt_local[None, :]: [1, tile_k], broadcast over tile_m axis
-            cb_local *= dt_local[None, :]
+            dt_local = broadcast(dt_local, 0, [tile_m, dt_local.size(0)])
+            cb_local *= dt_local
             # Yet not support sparse matmul
             # pred = (tile_m.index + 0)[:, None] >= (tile_k.index + 0)[None, :]
             # cb_local = torch.where(pred, cb_local, torch.zeros_like(cb_local))
@@ -162,7 +167,7 @@ def helion_mamba2_chunk_scan_kernel(
         x_residual = x[
             tile_b.begin, tile_c.begin * chunk_size + tile_m.index, tile_h.begin, tile_n
         ]
-        # D_local broadcasts to [tile_m, tile_n]
+        # D_local scalar broadcasts to [tile_m, tile_n]
         acc_o += x_residual * D_local
         # out[...] tile: [tile_m, tile_n]
         out[
