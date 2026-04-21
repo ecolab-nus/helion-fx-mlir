@@ -1168,7 +1168,12 @@ class IRVisitor:
             fake_tensor = tensor_node.meta.get("val")
             if fake_tensor is not None and hasattr(fake_tensor, 'ndim') and dim < fake_tensor.ndim:
                 dim_size = fake_tensor.size(dim)
-                value_str, is_static = self.resolve_dimension(dim_size, dim)
+                overrides = self.ctx.gather_dim_overrides.get(tensor_node.name)
+                value_str, is_static = self.resolve_dimension(
+                    dim_size,
+                    dim,
+                    overrides=overrides,
+                )
                 if value_str is not None:
                     # We have a known value - use it directly
                     self.ctx.node_values[node.name] = value_str
