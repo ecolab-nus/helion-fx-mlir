@@ -44,33 +44,37 @@ _custome_ops_cache: dict | None = None
 
 
 def _get_custome_ops() -> dict:
-    """Lazily load custom ops from custome_op package (optional).
+    """Lazily load custom ops from the helion_mlir custome_op package.
 
     Returns a dict mapping handler name -> function object.
     Returns an empty dict if the package is not available.
 
-    Note: ``custome_op/__init__.py`` re-exports ops from submodules, which can
-    shadow module names in the package namespace. We use
-    ``importlib.import_module`` to access real submodules and retrieve the
-    decorated function objects.
+    Preferred import path is ``helion_mlir.custome_op`` (installed package).
+    For backward compatibility in local, uninstalled checkouts, we also try the
+    legacy top-level ``custome_op`` package as a fallback.
     """
     global _custome_ops_cache
     if _custome_ops_cache is not None:
         return _custome_ops_cache
 
-    import importlib, pathlib, sys
-    custome_op_dir = str(pathlib.Path(__file__).resolve().parents[2])  # helion-mlir root
-    if custome_op_dir not in sys.path:
-        sys.path.insert(0, custome_op_dir)
+    import importlib
     try:
-        gather_mod = importlib.import_module("custome_op.gather")
-        broadcast_mod = importlib.import_module("custome_op.broadcast")
+        gather_mod = importlib.import_module("helion_mlir.custome_op.gather")
+        broadcast_mod = importlib.import_module("helion_mlir.custome_op.broadcast")
         _custome_ops_cache = {
             "gather": gather_mod.gather,
             "broadcast": broadcast_mod.broadcast,
         }
     except Exception:
-        _custome_ops_cache = {}
+        try:
+            gather_mod = importlib.import_module("custome_op.gather")
+            broadcast_mod = importlib.import_module("custome_op.broadcast")
+            _custome_ops_cache = {
+                "gather": gather_mod.gather,
+                "broadcast": broadcast_mod.broadcast,
+            }
+        except Exception:
+            _custome_ops_cache = {}
     return _custome_ops_cache
 
 from .mlir_utils import (
