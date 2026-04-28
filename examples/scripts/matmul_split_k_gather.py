@@ -52,7 +52,7 @@ def split_k_matmul_gather(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     m, k = a.shape
     _, n = b.shape
-    out = torch.empty((m, n), device=a.device, dtype=a.dtype)
+    out_ = torch.empty((m, n), device=a.device, dtype=a.dtype)
 
     for tile_m, tile_n, tile_k in hl.tile([m, n, k]):
         local_acc = torch.mm(a[tile_m, tile_k], b[tile_k, tile_n])
@@ -61,9 +61,9 @@ def split_k_matmul_gather(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         gathered = gather(tile_k, local_acc)
         if tile_k.id == 0:
             acc_across_k = torch.sum(gathered, 0)
-            out[tile_m, tile_n] = acc_across_k
+            out_[tile_m, tile_n] = acc_across_k
 
-    return out
+    return out_
 
 
 # ---------------------------------------------------------------------------

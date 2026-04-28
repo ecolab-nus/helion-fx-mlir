@@ -55,7 +55,7 @@ def flash_decode(
     v_view = v_in.reshape([batch, kvseq_len, head_dim])
 
     sm_scale = 1.0 / math.sqrt(head_dim)
-    out = torch.zeros([batch, num_q_head, head_dim], dtype=torch.float16)
+    out_ = torch.zeros([batch, num_q_head, head_dim], dtype=torch.float16)
     
 
     # tile_h: head index, tile_s: split segment of sequence L
@@ -114,9 +114,9 @@ def flash_decode(
             # broadcast head_dim pieces of norm_scale along axis -1
             norm_scale = broadcast(norm_scale, 3, [norm_scale.size(0), norm_scale.size(1), norm_scale.size(2), head_dim])
             weighted_acc = torch.sum(gathered_acc * norm_scale, 0)
-            out[tile_b, :, :] = weighted_acc
+            out_[tile_b, :, :] = weighted_acc
 
-    return out.view(q_in.size())
+    return out_.view(q_in.size())
 
 
 def main() -> None:

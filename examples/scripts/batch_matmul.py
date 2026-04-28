@@ -65,15 +65,15 @@ def batch_matmul(
     b2, k2, n = y.size()
     assert k == k2, f"size mismatch {k} != {k2}"
     assert b == b2, f"size mismatch {b} != {b2}"
-    out = torch.empty(
+    out_ = torch.empty(
         [b, m, n], dtype=torch.promote_types(x.dtype, y.dtype), device=x.device
     )
     for tile_b, tile_m, tile_n in hl.tile([b, m, n]):
         acc = hl.zeros([tile_b, tile_m, tile_n], dtype=torch.float16)
         for tile_k in hl.tile(k):
             acc = torch.baddbmm(acc, x[tile_b, tile_m, tile_k], y[tile_b, tile_k, tile_n])
-        out[tile_b, tile_m, tile_n] = epilogue(acc, (tile_b, tile_m, tile_n))
-    return out
+        out_[tile_b, tile_m, tile_n] = epilogue(acc, (tile_b, tile_m, tile_n))
+    return out_
 
 
 # %%
