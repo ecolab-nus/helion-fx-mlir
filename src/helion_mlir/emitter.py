@@ -25,7 +25,8 @@ class ModuleEmitter:
 
         func_args = []
         for tensor_name, tensor_type in self.session.host_tensor_types.items():
-            ssa_name = f"%{tensor_name}"
+            # Keep function argument names collision-safe for nested region blocks.
+            ssa_name = f"%{tensor_name}_arg"
             func_args.append((ssa_name, tensor_type))
             self.session.host_tensors[tensor_name] = ssa_name
         args_str = ", ".join(f"{name}: {typ}" for name, typ in func_args)
@@ -101,7 +102,7 @@ class ModuleEmitter:
         def repl(match: re.Match[str]) -> str:
             idx = int(match.group(1))
             if idx < len(host_names):
-                return f"%{host_names[idx]}"
+                return f"%{host_names[idx]}_arg"
             return match.group(0)
 
         return re.sub(r"%arg([0-9]+)\b", repl, mlir_text)

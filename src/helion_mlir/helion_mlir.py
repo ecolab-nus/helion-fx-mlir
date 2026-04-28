@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from .analysis import build_kernel_analysis
 from .emitter import ModuleEmitter
+from .errors import MissingGraphError
 from .ir_visitor import IRVisitor
 from .session import LoweringSession
 
@@ -45,7 +46,7 @@ def generate_mlir(
         root_gid = root_ids[grid_idx]
         root_graph = root_graphs.get(root_gid)
         if root_graph is None:
-            raise ValueError(f"Root graph {root_gid} for grid group {grid_idx} not found")
+            raise MissingGraphError(f"Root graph {root_gid} for grid group {grid_idx} not found")
 
         ub_ssas: list[str] = []
         iv_names: list[str] = []

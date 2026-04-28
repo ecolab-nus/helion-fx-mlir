@@ -1,79 +1,54 @@
 """Utilities for Helion-to-MLIR lowering.
 
-This package provides infrastructure for converting Helion kernels
-(via their Device IR and FX graphs) to MLIR text representation.
-
-Main entry points:
-- generate_mlir: Generate MLIR from a bound Helion kernel
-- validate_with_mlir_opt: Validate emitted MLIR with mlir-opt
-
-Stable public API:
-- generate_mlir
-- validate_with_mlir_opt
-- debug printing helpers
-
-Internal implementation types are still re-exported for compatibility, but
-new code should treat them as private unless explicitly documented otherwise.
+Public API is intentionally narrow. Internal symbols remain available via
+compatibility exports but emit a deprecation warning when accessed.
 """
 
-# Main entry points
+from __future__ import annotations
+
+from warnings import warn
+
+from .debug_utils import validate_with_mlir_opt
 from .helion_mlir import generate_mlir
 
-# IR visitor for custom extensions
-from .ir_visitor import IRVisitor
-
-# Core infrastructure (for extending with new lowerings)
-from .mlir_utils import (
-    MLIROutputHelper,
-    torch_dtype_to_mlir_element_type,
-    format_tensor_type,
-    format_shape_attr,
-    format_string_attr,
-    format_attr_dict,
-)
-
-from .lowering_context import (
-    LoweringContext,
-    collect_reduction_block_ids,
-)
-
-# Torch-MLIR integration (via FxImporter)
-from .torch_mlir_helper import (
-    TorchMLIRNodeImporter,
-    import_aten_node_to_mlir,
-)
-
-# Debug utilities
-from .debug_utils import (
-    print_debug_info,
-    print_device_ir,
-    print_nodes_with_symbols,
-    print_compile_env,
-    validate_with_mlir_opt,
-    run_dce_cleanup,
-)
-
 __all__ = [
-    # Main entry points
     "generate_mlir",
     "validate_with_mlir_opt",
-    # IR visitor
-    "IRVisitor",
-    # Builder and utilities
-    "MLIROutputHelper",
-    "torch_dtype_to_mlir_element_type",
-    "format_tensor_type",
-    "format_shape_attr",
-    "format_string_attr",
-    "format_attr_dict",
-    # Lowering context
-    "LoweringContext",
-    "collect_reduction_block_ids",
-    # Debug utilities
-    "print_debug_info",
-    "print_device_ir",
-    "print_nodes_with_symbols",
-    "print_compile_env",
-    "validate_with_mlir_opt",
-    "run_dce_cleanup",
 ]
+
+_COMPAT_EXPORTS: dict[str, tuple[str, str]] = {
+    "IRVisitor": (".ir_visitor", "IRVisitor"),
+    "MLIROutputHelper": (".mlir_utils", "MLIROutputHelper"),
+    "torch_dtype_to_mlir_element_type": (".mlir_utils", "torch_dtype_to_mlir_element_type"),
+    "format_tensor_type": (".mlir_utils", "format_tensor_type"),
+    "format_shape_attr": (".mlir_utils", "format_shape_attr"),
+    "format_string_attr": (".mlir_utils", "format_string_attr"),
+    "format_attr_dict": (".mlir_utils", "format_attr_dict"),
+    "LoweringContext": (".lowering_context", "LoweringContext"),
+    "collect_reduction_block_ids": (".lowering_context", "collect_reduction_block_ids"),
+    "TorchMLIRNodeImporter": (".torch_mlir_helper", "TorchMLIRNodeImporter"),
+    "import_aten_node_to_mlir": (".torch_mlir_helper", "import_aten_node_to_mlir"),
+    "print_debug_info": (".debug_utils", "print_debug_info"),
+    "print_device_ir": (".debug_utils", "print_device_ir"),
+    "print_nodes_with_symbols": (".debug_utils", "print_nodes_with_symbols"),
+    "print_compile_env": (".debug_utils", "print_compile_env"),
+    "run_dce_cleanup": (".debug_utils", "run_dce_cleanup"),
+}
+
+
+def __getattr__(name: str):
+    target = _COMPAT_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(name)
+
+    module_name, attr_name = target
+    warn(
+        f"helion_mlir.{name} is deprecated as a top-level export and may be removed in a future release. "
+        f"Import from {module_name} instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    module = __import__(f"helion_mlir{module_name}", fromlist=[attr_name])
+    value = getattr(module, attr_name)
+    globals()[name] = value
+    return value

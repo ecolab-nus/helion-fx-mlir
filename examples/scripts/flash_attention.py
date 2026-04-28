@@ -12,7 +12,7 @@ if str(_SYS_SRC) not in sys.path:
     sys.path.insert(0, str(_SYS_SRC))
 
 from helion_mlir import generate_mlir, validate_with_mlir_opt, print_debug_info
-from helion_mlir.custome_op import broadcast
+from helion_mlir.custom_op import broadcast
 
 
 @helion.kernel(

@@ -30,7 +30,7 @@ for path in [str(_SRC_ROOT), str(_REPO_ROOT)]:
         sys.path.insert(0, path)
 
 from helion_mlir import generate_mlir, validate_with_mlir_opt, print_debug_info
-from helion_mlir.custome_op import gather, broadcast  # registers the op with Helion's decorator API
+from helion_mlir.custom_op import gather, broadcast  # registers the op with Helion's decorator API
 
 
 # %%

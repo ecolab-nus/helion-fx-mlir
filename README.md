@@ -1,6 +1,6 @@
 # Helion → MLIR Lowering
 
-This repository provides a tool to lower [Helion](https://github.com/pytorch-labs/helion) kernels into MLIR (Affine + Linalg-on-Tensors). It reuses Helion's front-end, starting from Helion's Device IR FX graphs and translating them into MLIR.
+This repository provides a tool to lower [Helion](https://github.com/helion-project/helion) kernels into MLIR (Affine + Linalg-on-Tensors). It reuses Helion's front-end, starting from Helion's Device IR FX graphs and translating them into MLIR.
 
 ## Motivation
 
@@ -14,7 +14,7 @@ This higher-level representation enables analyses that can target diverse archit
 
 ## Output
 
-The generated MLIR includes custom `loom.*` operations to support symbolic shapes (which MLIR does not natively support). This output is designed to be consumed by our [Loom](https://github.com/ecolab-nus/loom-dataflow) compiler infrastructure for targeting various architectures, especially dataflow architectures.
+The generated MLIR includes custom `loom.*` operations to support symbolic shapes (which MLIR does not natively support). This output is designed to be consumed by downstream compiler infrastructure for targeting various architectures, especially dataflow architectures.
 
 
 

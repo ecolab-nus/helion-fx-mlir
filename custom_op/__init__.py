@@ -1,4 +1,4 @@
-"""Custom ops for helion-mlir — registered via Helion's decorator API."""
+"""Custom ops for local examples, registered via Helion's decorator API."""
 
 from .broadcast import broadcast
 from .gather import gather

@@ -32,50 +32,8 @@ import helion.language.creation_ops as hl_creation_ops
 import helion.language.view_ops as hl_view_ops
 import helion.language.tile_ops as hl_tile_ops
 
-from .handlers import (
-    register_compute_handlers,
-    register_control_flow_handlers,
-    register_memory_handlers,
-    register_symbol_handlers,
-    register_tensor_handlers,
-    register_tile_handlers,
-)
-_custome_ops_cache: dict | None = None
-
-
-def _get_custome_ops() -> dict:
-    """Lazily load custom ops from the helion_mlir custome_op package.
-
-    Returns a dict mapping handler name -> function object.
-    Returns an empty dict if the package is not available.
-
-    Preferred import path is ``helion_mlir.custome_op`` (installed package).
-    For backward compatibility in local, uninstalled checkouts, we also try the
-    legacy top-level ``custome_op`` package as a fallback.
-    """
-    global _custome_ops_cache
-    if _custome_ops_cache is not None:
-        return _custome_ops_cache
-
-    import importlib
-    try:
-        gather_mod = importlib.import_module("helion_mlir.custome_op.gather")
-        broadcast_mod = importlib.import_module("helion_mlir.custome_op.broadcast")
-        _custome_ops_cache = {
-            "gather": gather_mod.gather,
-            "broadcast": broadcast_mod.broadcast,
-        }
-    except Exception:
-        try:
-            gather_mod = importlib.import_module("custome_op.gather")
-            broadcast_mod = importlib.import_module("custome_op.broadcast")
-            _custome_ops_cache = {
-                "gather": gather_mod.gather,
-                "broadcast": broadcast_mod.broadcast,
-            }
-        except Exception:
-            _custome_ops_cache = {}
-    return _custome_ops_cache
+from .registry import build_handler_registry, load_custom_ops
+from .errors import UnsupportedTargetError
 
 from .mlir_utils import (
     format_attr_dict,
@@ -106,7 +64,7 @@ class IRVisitor:
         visitor.visit_graph(root_graph)
     """
     
-    def __init__(self, ctx: "LoweringContext"):
+    def __init__(self, ctx: "LoweringContext", *, custom_ops: dict[str, tuple[object, ...]] | None = None):
         self.ctx = ctx
         self.mlir_output_helper = ctx.mlir_output_helper
         
@@ -120,14 +78,8 @@ class IRVisitor:
         self.range_index_block_ids: dict[str, int] = {}
         # Active scf.for bounds keyed by canonical block_id.
         self.loop_bounds: dict[int, tuple[str, str]] = {}
-        self._direct_handlers: dict[object, str] = {}
-        self._predicate_handlers: list[tuple[object, str]] = []
-        register_symbol_handlers(self._direct_handlers, self._predicate_handlers)
-        register_tile_handlers(self._direct_handlers, self._predicate_handlers)
-        register_control_flow_handlers(self._direct_handlers, self._predicate_handlers)
-        register_memory_handlers(self._direct_handlers, self._predicate_handlers)
-        register_tensor_handlers(self._direct_handlers, self._predicate_handlers)
-        register_compute_handlers(self._direct_handlers, self._predicate_handlers)
+        self._direct_handlers, self._predicate_handlers = build_handler_registry()
+        self._custom_ops = custom_ops if custom_ops is not None else load_custom_ops()
     
     def resolve_dimension(self, dim_size, dim_hint: int = 0, overrides: dict[int, str] | None = None) -> tuple[str, bool]:
         """Resolve a dimension size to an SSA value or inline literal.
@@ -272,10 +224,9 @@ class IRVisitor:
         if self._is_python_index_arith_target(target):
             return self.visit_python_index_arith(node)
 
-        _custom = _get_custome_ops()
-        if target is _custom.get("gather"):
+        if target in self._custom_ops.get("gather", ()):
             return self.visit_gather(node)
-        if target is _custom.get("broadcast"):
+        if target in self._custom_ops.get("broadcast", ()):
             return self.visit_broadcast(node)
 
         if target is aten.add.Tensor:
@@ -303,7 +254,7 @@ class IRVisitor:
             if predicate(target):
                 return getattr(self, handler_name)(node)
 
-        raise RuntimeError(f"Unsupported target: {target}")
+        raise UnsupportedTargetError(f"Unsupported target: {target}")
 
     
     def visit_output(self, node: fx.Node) -> str | None:
