@@ -1924,11 +1924,13 @@ class IRVisitor:
             f"{src_buf_ssa} = bufferization.to_buffer {src_ssa} : {src_type} to {src_memref_type}"
         )
 
+        dynamic_index_sentinel = "-9223372036854775808"
         dynamic_placeholder_sizes = [
             dim for dim in placeholder_shape if dim.startswith("%")
         ]
         static_placeholder_sizes = [
-            "-1" if dim.startswith("%") else dim for dim in placeholder_shape
+            dynamic_index_sentinel if dim.startswith("%") else dim
+            for dim in placeholder_shape
         ]
 
         placeholder_ssa = self.mlir_output_helper.fresh("gather_dst")
