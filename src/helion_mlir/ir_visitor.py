@@ -1783,22 +1783,21 @@ class IRVisitor:
         return subview_ssa
 
     def visit_gather(self, node: fx.Node) -> str:
-        """Emit a linalg-style ``loom.gather`` op for the custom gather op.
+        """Emit the buffer-only ``loom.gather`` bridge sequence.
 
         Lowering pattern for ``gathered = gather(tile_k, src)``:
 
-          %empty    = tensor.empty(%trip_count, d0, d1, ...) : tensor<?x*src_shape>
-          %gathered = "loom.gather"(%src, %empty, %iv_block_N)
-                        : (tensor<*src_shape>, tensor<?x*src_shape>, index)
-                        -> tensor<?x*src_shape>
+          %src_buf  = bufferization.to_buffer %src
+          %dst_buf  = "loom.placeholder"(%trip_count, ...)
+          "loom.gather"(%src_buf, %dst_buf, %iv_block_N)
+          %gathered = bufferization.to_tensor %dst_buf
 
-        Operand convention (mirrors linalg ins/outs/across):
-          arg 0  – ins:    source tile tensor
-          arg 1  – outs:   output buffer (tensor.empty with leading trip-count dim)
-          arg 2  – across: loop IV of the gathered axis (runtime index)
-
-        The op is an unregistered-dialect placeholder; pass
-        ``--allow-unregistered-dialect`` to mlir-opt for validation.
+        The placeholder carries the same shape that the old tensor.empty used
+        to carry, but it has no real allocation semantics. Later LOOM pipeline
+        passes convert the generic bufferization bridge ops to loom bridge ops
+        and memory binding replaces the placeholder with an assigned buffer.
+        The LOOM ops are emitted in generic quoted form because Helion validates
+        against upstream mlir-opt before the LOOM dialect is registered.
         """
         tile_node = node.args[0]
         src_node = node.args[1]
@@ -1865,14 +1864,15 @@ class IRVisitor:
             result_type = f"tensor<?x{src_type}>"
 
         # ------------------------------------------------------------------
-        # Resolve per-dimension SSAs for tensor.empty(%trip_count, d0, d1, …).
-        # Use FakeTensor metadata when available so that static dims
-        # (e.g. from hl.specialize) appear as literals rather than tensor.dim
-        # calls, keeping the empty type consistent with result_type.
+        # Resolve per-dimension SSAs for loom.placeholder
+        # [%trip_count, d0, d1, ...]. Use FakeTensor metadata when available so
+        # static dims (e.g. from hl.specialize) appear as literals rather than
+        # tensor.dim calls, keeping the placeholder type consistent with the
+        # final tensor type.
         # ------------------------------------------------------------------
         src_fake_tensor = src_node.meta.get("val") if isinstance(src_node, fx.Node) else None
 
-        empty_shape_ssas: list[str] = [trip_count_ssa]  # leading trip-count dim
+        placeholder_shape: list[str] = [trip_count_ssa]  # leading trip-count dim
         result_inner_dims: list[str] = []               # dims for result_type (after '?x')
 
         ndim = src_fake_tensor.ndim if src_fake_tensor is not None else 0
@@ -1897,11 +1897,11 @@ class IRVisitor:
                 )
                 dim_resolved = dim_ssa
 
-            empty_shape_ssas.append(dim_resolved)
+            placeholder_shape.append(dim_resolved)
             result_inner_dims.append(dim_resolved if is_static else "?")
 
         # Re-derive result_type using the statically-resolved inner dims so that
-        # tensor.empty's result type matches what downstream consumers expect.
+        # the placeholder/result types match what downstream consumers expect.
         dtype_suffix = src_type[src_type.rfind("x") + 1:-1]  # e.g. "f16"
         if result_inner_dims:
             inner_dims_str = "x".join(result_inner_dims)
@@ -1909,30 +1909,46 @@ class IRVisitor:
         else:
             result_type = f"tensor<?x{dtype_suffix}>"
 
-        # ------------------------------------------------------------------
-        # Emit tensor.empty for the output buffer.
-        # ------------------------------------------------------------------
-        empty_shape_str = ", ".join(
-            s for s in empty_shape_ssas if s.startswith("%")
-        )
-        empty_ssa = self.mlir_output_helper.fresh("gather_out")
+        def tensor_to_memref_type(type_str: str) -> str:
+            if type_str.startswith("tensor<") and type_str.endswith(">"):
+                return f"memref<{type_str[len('tensor<'):-1]}>"
+            if type_str.startswith("memref<") and type_str.endswith(">"):
+                return type_str
+            raise RuntimeError(f"gather: expected tensor/memref type, got {type_str}")
+
+        src_memref_type = tensor_to_memref_type(src_type)
+        dst_memref_type = tensor_to_memref_type(result_type)
+
+        src_buf_ssa = self.mlir_output_helper.fresh("gather_src")
         self.mlir_output_helper.emit(
-            f"{empty_ssa} = tensor.empty({empty_shape_str}) : {result_type}"
+            f"{src_buf_ssa} = bufferization.to_buffer {src_ssa} : {src_type} to {src_memref_type}"
         )
 
-        # ------------------------------------------------------------------
-        # Emit loom.gather in linalg-style (registered op).
-        # GatherOp uses AttrSizedOperandSegments; the attribute name in this
-        # MLIR version is camelCase "operandSegmentSizes" (not snake_case).
-        # The four optional MeshBoundsArgs are absent (size = 0 each).
-        # Segment order: ins(1), init(1), across(1), ul_x(0), ul_y(0),
-        #                lr_x(0), lr_y(0)
-        # ------------------------------------------------------------------
+        dynamic_placeholder_sizes = [
+            dim for dim in placeholder_shape if dim.startswith("%")
+        ]
+        static_placeholder_sizes = [
+            "-1" if dim.startswith("%") else dim for dim in placeholder_shape
+        ]
+
+        placeholder_ssa = self.mlir_output_helper.fresh("gather_dst")
+        self.mlir_output_helper.emit(
+            f'{placeholder_ssa} = "loom.placeholder"'
+            f'({", ".join(dynamic_placeholder_sizes)}) '
+            f'{{static_sizes = array<i64: {", ".join(static_placeholder_sizes)}>}} '
+            f': ({", ".join(["index"] * len(dynamic_placeholder_sizes))}) -> {dst_memref_type}'
+        )
+
+        self.mlir_output_helper.emit(
+            f'"loom.gather"({src_buf_ssa}, {placeholder_ssa}, {iv_ssa}) '
+            f'{{operandSegmentSizes = array<i32: 1, 1, 1, 0, 0, 0, 0, 0>, '
+            f'static_area = array<i64: 1, 1>}} '
+            f': ({src_memref_type}, {dst_memref_type}, index) -> ()'
+        )
+
         result_ssa = self.mlir_output_helper.fresh("gathered")
         self.mlir_output_helper.emit(
-            f'{result_ssa} = "loom.gather"({src_ssa}, {empty_ssa}, {iv_ssa}) '
-            f'{{operandSegmentSizes = array<i32: 1, 1, 1, 0, 0, 0, 0>}} '
-            f': ({src_type}, {result_type}, index) -> {result_type}'
+            f"{result_ssa} = bufferization.to_tensor {placeholder_ssa} : {dst_memref_type} to {result_type}"
         )
 
         self.ctx.node_values[node.name] = result_ssa
