@@ -22,7 +22,11 @@ import helion.language as hl
 
 # Make sure the repo-local src/ package is importable when the example is
 # executed directly.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_HERE = Path(__file__).resolve()
+_REPO_ROOT = next(
+    (p for p in [_HERE.parent, *_HERE.parents] if (p / "src" / "helion_mlir").is_dir()),
+    _HERE.parents[2] if len(_HERE.parents) > 2 else _HERE.parent,
+)
 _SRC_ROOT = _REPO_ROOT / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
