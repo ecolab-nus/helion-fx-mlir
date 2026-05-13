@@ -81,6 +81,7 @@ def build_kernel_analysis(
 ) -> KernelAnalysis:
     from helion._compiler.device_ir import IfGraphInfo, ReductionLoopGraphInfo, RootGraphInfo, ForLoopGraphInfo
     import helion.language._tracing_ops as hl_tracing_ops
+    import helion.language.tile_ops as hl_tile_ops
     import helion.language.memory_ops as hl_memory_ops
     from helion._compiler.variable_origin import BlockSizeOrigin
 
@@ -187,6 +188,70 @@ def build_kernel_analysis(
     for ginfo in inner_graphs.values():
         used_block_ids.update(getattr(ginfo, "block_ids", []))
     used_canonical_ids = {alias.get(bid, bid) for bid in used_block_ids}
+
+    # Propagate natural loop upper bounds through tiled subranges.
+    # For patterns like `for tile_n in hl.tile(tile_s.begin, tile_s.end)`,
+    # tile_n tiles tile_s's span, so tile_n's natural upper bound should
+    # inherit tile_s's natural upper bound (we do not model dynamic nubs yet).
+    for ginfo in (*root_graphs.values(), *inner_graphs.values()):
+        for node in ginfo.graph.nodes:
+            if node.op != "call_function" or node.target is not hl_tracing_ops._for_loop:
+                continue
+            if len(node.args) < 3:
+                continue
+
+            nested_gid = node.args[0]
+            if not isinstance(nested_gid, int):
+                continue
+            nested_info = inner_graphs.get(nested_gid)
+            if nested_info is None:
+                continue
+            nested_block_ids = getattr(nested_info, "block_ids", [])
+            if len(nested_block_ids) != 1:
+                continue
+            child_canonical = alias.get(nested_block_ids[0], nested_block_ids[0])
+
+            lower_bounds = node.args[1]
+            upper_bounds = node.args[2]
+            if (
+                not isinstance(lower_bounds, (list, tuple))
+                or not isinstance(upper_bounds, (list, tuple))
+                or len(lower_bounds) != 1
+                or len(upper_bounds) != 1
+            ):
+                continue
+            lb_node = lower_bounds[0]
+            ub_node = upper_bounds[0]
+            if (
+                getattr(lb_node, "op", None) != "call_function"
+                or getattr(ub_node, "op", None) != "call_function"
+                or lb_node.target is not hl_tile_ops.tile_begin
+                or ub_node.target is not hl_tile_ops.tile_end
+                or not lb_node.args
+                or not ub_node.args
+                or lb_node.args[0] is not ub_node.args[0]
+            ):
+                continue
+
+            parent_sym_node = lb_node.args[0]
+            if (
+                getattr(parent_sym_node, "op", None) != "call_function"
+                or parent_sym_node.target is not hl_tracing_ops._get_symnode
+                or not parent_sym_node.args
+            ):
+                continue
+            parent_name = parent_sym_node.args[0]
+            if not isinstance(parent_name, str) or not parent_name.startswith("block_size_"):
+                continue
+            try:
+                parent_block_id = int(parent_name.removeprefix("block_size_"))
+            except ValueError:
+                continue
+            parent_canonical = alias.get(parent_block_id, parent_block_id)
+            parent_extent = loop_extents.get(parent_canonical)
+            if parent_extent is None:
+                continue
+            loop_extents[child_canonical] = parent_extent
 
     module_attributes: dict[str, tuple[object, str]] = {}
     seen_canonical: set[int] = set()
